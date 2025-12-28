@@ -2,4 +2,4 @@
 aiogram==3.4.1
 yt-dlp
 python-dotenv
-ffmpeg-static
+ffmpeg-python
