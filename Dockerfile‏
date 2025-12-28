@@ -1,21 +1,20 @@
 # 1. استخدام صورة بايثون رسمية كأساس
-FROM python:3.10-slim
+FROM python:3.11.9-slim
 
 # 2. تعيين مجلد العمل داخل الحاوية
 WORKDIR /app
 
-# 3. تثبيت ffmpeg (مهم جدًا لـ yt-dlp)
-#    نستخدم apt-get لتثبيت برامج على مستوى النظام
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# 3. تحديث وتثبيت ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# 4. نسخ ملف المتطلبات أولاً (للاستفادة من التخزين المؤقت لـ Docker)
+# 4. نسخ ملف المتطلبات
 COPY requirements.txt .
 
 # 5. تثبيت مكتبات بايثون
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. نسخ كل كود المشروع إلى الحاوية
+# 6. نسخ كل كود المشروع
 COPY . .
 
-# 7. الأمر الذي سيتم تشغيله عند بدء تشغيل الحاوية
+# 7. الأمر النهائي لتشغيل البوت
 CMD ["python", "run.py"]
