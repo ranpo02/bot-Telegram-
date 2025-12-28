@@ -6,11 +6,11 @@ import uuid
 import logging
 from typing import Optional, Tuple
 
-# 1. استيراد الحزمة الجديدة
-import ffmpeg_static
+# لا نحتاج إلى أي استيراد إضافي هنا.
+# yt-dlp ذكي بما يكفي لاكتشاف ffmpeg-python إذا كانت مثبتة.
 
 class Downloader:
-    """أداة تحميل باستخدام yt-dlp وحزمة ffmpeg-static."""
+    """أداة تحميل باستخدام yt-dlp."""
 
     async def _run_command(self, command: str) -> Tuple[bool, str, str]:
         """تشغيل أمر في الـ shell بشكل غير متزامن."""
@@ -39,23 +39,17 @@ class Downloader:
     async def download_media(self, url: str, to_mp3: bool = False) -> Optional[Tuple[str, str]]:
         """
         تحميل الفيديو أو الصوت باستخدام yt-dlp.
-        :param url: رابط المحتوى.
-        :param to_mp3: تحويل إلى MP3 أم لا.
-        :return: مسار الملف المحمل واسم الملف الأصلي، أو None عند الفشل.
         """
         download_id = str(uuid.uuid4())
         temp_dir = "temp_downloads"
         os.makedirs(temp_dir, exist_ok=True)
         output_template = os.path.join(temp_dir, f"{download_id}.%(ext)s")
         
-        # 2. الحصول على مسار ffmpeg من الحزمة المثبتة
-        ffmpeg_path = ffmpeg_static.get_ffmpeg_path()
-
-        # 3. تعديل الأوامر لتضمين مسار ffmpeg
+        # الأوامر الآن بسيطة وبدون مسار إضافي
         if to_mp3:
-            command = f'yt-dlp --ffmpeg-location "{ffmpeg_path}" -x --audio-format mp3 -o "{output_template}" "{url}"'
+            command = f'yt-dlp -x --audio-format mp3 -o "{output_template}" "{url}"'
         else:
-            command = f'yt-dlp --ffmpeg-location "{ffmpeg_path}" -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
+            command = f'yt-dlp -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
 
         logging.info(f"بدء التحميل بالأمر: {command}")
         success, stdout, stderr = await self._run_command(command)
