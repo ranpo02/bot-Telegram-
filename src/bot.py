@@ -6,11 +6,13 @@ from aiogram.types import Message, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from .config import BOT_TOKEN
-from .utils import setup_logger, find_url_in_text
-from .downloader import Downloader
+# === التغيير هنا: حذفنا النقطة من الاستيراد ===
+from config import BOT_TOKEN
+from utils import setup_logger, find_url_in_text
+from downloader import Downloader
 
-# إعداد الراوتر الرئيسي
+# ... (بقية الكود يبقى كما هو تمامًا) ...
+
 router = Router()
 
 @router.message(Command("start", "help", "مساعدة"))
@@ -31,13 +33,11 @@ async def handle_link(message: Message, downloader: Downloader):
         await message.reply("لم أتمكن من العثور على رابط صالح في رسالتك. الرجاء إرسال رابط مباشر.")
         return
 
-    # التحقق إذا كان الطلب لتحويل الفيديو إلى صوت
     to_mp3 = 'mp3' in message.text.lower() and ('youtube.com' in url.lower() or 'youtu.be' in url.lower())
     
     status_message = await message.reply("✅ تم استلام الرابط، جاري التحليل والتحميل...")
 
     try:
-        # استدعاء دالة التحميل
         result = await downloader.download_media(url, to_mp3)
 
         if result:
@@ -56,7 +56,6 @@ async def handle_link(message: Message, downloader: Downloader):
                 logging.error(f"فشل إرسال الملف: {send_error}")
                 await status_message.edit_text("❌ عذراً، حجم الملف أكبر من المسموح به في تيليجرام (50MB).")
 
-            # حذف الملف المؤقت بعد الإرسال
             downloader._cleanup(file_path)
             await status_message.delete()
         else:
@@ -71,11 +70,9 @@ async def main():
     setup_logger()
     
     bot = Bot(token=BOT_TOKEN)
-    # استخدام MemoryStorage لتمرير الكائنات للمتحكمات
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     
-    # تمرير كائن Downloader إلى المتحكمات عبر الـ middleware
     downloader_instance = Downloader()
     dp.workflow_data["downloader"] = downloader_instance
     
@@ -85,9 +82,4 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
-def run():
-    """نقطة الدخول لتشغيل البوت من خارج الملف."""
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("تم إيقاف البوت.")
+# لم نعد بحاجة لدالة run() هنا
