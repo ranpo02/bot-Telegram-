@@ -46,10 +46,14 @@ class Downloader:
         output_template = os.path.join(temp_dir, f"{download_id}.%(ext)s")
         
         # الأوامر الآن بسيطة وبدون مسار إضافي
-        if to_mp3:
-            command = f'yt-dlp -x --audio-format mp3 -o "{output_template}" "{url}"'
-        else:
-            command = f'yt-dlp -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
+        # === الأوامر الجديدة والمحسّنة ===
+# خيارات إضافية للتحايل على حماية يوتيوب
+extra_opts = "--no-check-certificate --add-header 'User-Agent: Mozilla/5.0'"
+
+if to_mp3:
+    command = f'yt-dlp {extra_opts} -x --audio-format mp3 -o "{output_template}" "{url}"'
+else:
+    command = f'yt-dlp {extra_opts} -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
 
         logging.info(f"بدء التحميل بالأمر: {command}")
         success, stdout, stderr = await self._run_command(command)
