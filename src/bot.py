@@ -6,13 +6,12 @@ from aiogram.types import Message, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# === التغيير هنا: حذفنا النقطة من الاستيراد ===
-from config import BOT_TOKEN
-from utils import setup_logger, find_url_in_text
-from downloader import Downloader
+# === التعديل النهائي هنا: استخدام الاستيراد النسبي (مع نقطة) ===
+from .config import BOT_TOKEN
+from .utils import setup_logger, find_url_in_text
+from .downloader import Downloader
 
-# ... (بقية الكود يبقى كما هو تمامًا) ...
-
+# إعداد الراوتر الرئيسي
 router = Router()
 
 @router.message(Command("start", "help", "مساعدة"))
@@ -81,5 +80,3 @@ async def main():
     logging.info("بدء تشغيل البوت...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
-# لم نعد بحاجة لدالة run() هنا
