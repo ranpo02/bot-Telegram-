@@ -1,5 +1,6 @@
 # src/run.py
-from bot import main
+# === التغيير هنا: أضفنا نقطة قبل bot ===
+from .bot import main
 import asyncio
 
 if __name__ == "__main__":
@@ -8,3 +9,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("تم إيقاف البوت.")
+
