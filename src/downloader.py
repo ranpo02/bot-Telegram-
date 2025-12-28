@@ -6,9 +6,6 @@ import uuid
 import logging
 from typing import Optional, Tuple
 
-# لا نحتاج إلى أي استيراد إضافي هنا.
-# yt-dlp ذكي بما يكفي لاكتشاف ffmpeg-python إذا كانت مثبتة.
-
 class Downloader:
     """أداة تحميل باستخدام yt-dlp."""
 
@@ -45,15 +42,13 @@ class Downloader:
         os.makedirs(temp_dir, exist_ok=True)
         output_template = os.path.join(temp_dir, f"{download_id}.%(ext)s")
         
-        # الأوامر الآن بسيطة وبدون مسار إضافي
-        # === الأوامر الجديدة والمحسّنة ===
-# خيارات إضافية للتحايل على حماية يوتيوب
-extra_opts = "--no-check-certificate --add-header 'User-Agent: Mozilla/5.0'"
+        # خيارات إضافية للتحايل على حماية بعض المواقع مثل يوتيوب
+        extra_opts = "--no-check-certificate --add-header 'User-Agent: Mozilla/5.0'"
 
-if to_mp3:
-    command = f'yt-dlp {extra_opts} -x --audio-format mp3 -o "{output_template}" "{url}"'
-else:
-    command = f'yt-dlp {extra_opts} -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
+        if to_mp3:
+            command = f'yt-dlp {extra_opts} -x --audio-format mp3 -o "{output_template}" "{url}"'
+        else:
+            command = f'yt-dlp {extra_opts} -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
 
         logging.info(f"بدء التحميل بالأمر: {command}")
         success, stdout, stderr = await self._run_command(command)
@@ -71,6 +66,7 @@ else:
             filepath = os.path.join(temp_dir, created_files[0])
 
             title = "media"
+            # محاولة استخراج العنوان من مخرجات yt-dlp
             title_search = re.search(r'\[info\]\s+(.*?):\s+Downloading webpage', stdout, re.IGNORECASE)
             if title_search:
                 title = title_search.group(1).strip()
