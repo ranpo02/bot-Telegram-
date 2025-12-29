@@ -1,82 +1,83 @@
 # src/bot.py
-import asyncio
-import logging
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, FSInputFile
-from aiogram.filters import Command
-from aiogram.fsm.storage.memory import MemoryStorage
 
-# === التعديل النهائي هنا: استخدام الاستيراد النسبي (مع نقطة) ===
-from .config import BOT_TOKEN
-from .utils import setup_logger, find_url_in_text
-from .downloader import Downloader
+import redis.asyncio as redis
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.constants import ParseMode
 
-# إعداد الراوتر الرئيسي
-router = Router()
+from .config import (
+    BOT_TOKEN, ADMIN_ID, REDIS_URL, REDIS_ENABLED,
+    USER_THROTTLE_LIMIT, USER_THROTTLE_PERIOD
+)
+from .downloader import download_media
+# السطر التالي هو الإصلاح الرئيسي: نستورد logger و is_valid_url
+from .utils import logger, cleanup_file, is_valid_url
 
-@router.message(Command("start", "help", "مساعدة"))
-async def cmd_start_help(message: Message):
-    """متحكم لأوامر البداية والمساعدة."""
-    await message.answer(
-        "أهلاً بك في بوت تحميل المحتوى!\n"
-        "أرسل لي أي رابط من (YouTube, Instagram, TikTok, X, Facebook, Pinterest) وسأقوم بتحميله لك.\n\n"
-        "**لتحويل فيديو يوتيوب إلى ملف صوتي (MP3):**\n"
-        "أرسل الرابط متبوعاً بكلمة `mp3`."
-    )
+if REDIS_ENABLED:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+else:
+    redis_client = None
+    logger.warning("لم يتم توفير REDIS_URL. سيتم تعطيل ميزات التخزين المؤقت والتحكم في الاستخدام.")
 
-@router.message(F.text)
-async def handle_link(message: Message, downloader: Downloader):
-    """متحكم لمعالجة الرسائل التي تحتوي على روابط."""
-    url = find_url_in_text(message.text)
-    if not url:
-        await message.reply("لم أتمكن من العثور على رابط صالح في رسالتك. الرجاء إرسال رابط مباشر.")
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("أهلاً بك! أرسل أي رابط فيديو أو صورة لتحميله.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("فقط أرسل الرابط. لا توجد أوامر خاصة.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    message_text = update.message.text
+
+    if not is_valid_url(message_text):
+        await update.message.reply_text("عذرًا، لم أتعرف على هذا الرابط. 🧐")
         return
 
-    to_mp3 = 'mp3' in message.text.lower() and ('youtube.com' in url.lower() or 'youtu.be' in url.lower())
-    
-    status_message = await message.reply("✅ تم استلام الرابط، جاري التحليل والتحميل...")
+    if REDIS_ENABLED:
+        key = f"user:{user_id}:requests"
+        current_requests = await redis_client.incr(key)
+        if current_requests == 1:
+            await redis_client.expire(key, USER_THROTTLE_PERIOD)
+        if current_requests > USER_THROTTLE_LIMIT:
+            await update.message.reply_text("لحظة من فضلك! ✋ لقد قمت بالعديد من الطلبات في وقت قصير.")
+            return
 
-    try:
-        result = await downloader.download_media(url, to_mp3)
-
-        if result:
-            file_path, original_name = result
-            await status_message.edit_text("⏳ تم التحميل بنجاح، جاري إرسال الملف...")
-            
-            input_file = FSInputFile(file_path, filename=original_name)
-            caption = f"تم التحميل بنجاح!\n\n🔗 المصدر: {url}"
-
+    if REDIS_ENABLED:
+        cached_file_id = await redis_client.get(f"url:{message_text}")
+        if cached_file_id:
+            logger.info(f"إرسال من الكاش: {cached_file_id}")
             try:
-                if to_mp3:
-                    await message.reply_audio(input_file, caption=caption)
-                else:
-                    await message.reply_video(input_file, caption=caption)
-            except Exception as send_error:
-                logging.error(f"فشل إرسال الملف: {send_error}")
-                await status_message.edit_text("❌ عذراً، حجم الملف أكبر من المسموح به في تيليجرام (50MB).")
+                await update.message.reply_video(cached_file_id)
+                return
+            except Exception as e:
+                logger.warning(f"فشل الإرسال من الكاش: {e}")
 
-            downloader._cleanup(file_path)
-            await status_message.delete()
-        else:
-            await status_message.edit_text("❌ عذراً، فشلت عملية التحميل. قد يكون الرابط غير مدعوم أو حدث خطأ ما.")
-    
-    except Exception as e:
-        logging.error(f"حدث خطأ غير متوقع أثناء معالجة الرابط {url}: {e}")
-        await status_message.edit_text("❌ حدث خطأ فادح أثناء المعالجة. الرجاء المحاولة مرة أخرى لاحقاً.")
+    processing_message = await update.message.reply_text("⏳ جارٍ تجهيز طلبك...")
 
-async def main():
-    """الدالة الرئيسية لتشغيل البوت."""
-    setup_logger()
-    
-    bot = Bot(token=BOT_TOKEN)
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
-    
-    downloader_instance = Downloader()
-    dp.workflow_data["downloader"] = downloader_instance
-    
-    dp.include_router(router)
+    filepath = await download_media(message_text)
 
-    logging.info("بدء تشغيل البوت...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    if filepath:
+        try:
+            logger.info(f"بدء إرسال الملف: {filepath}")
+            sent_message = await update.message.reply_video(video=open(filepath, 'rb'), supports_streaming=True)
+            if REDIS_ENABLED and sent_message.video:
+                await redis_client.set(f"url:{message_text}", sent_message.video.file_id, ex=60*60*24)
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+        except Exception as e:
+            logger.error(f"فشل إرسال الملف: {e}")
+            await context.bot.edit_message_text(text=f"عذرًا، حدث خطأ أثناء إرسال الملف.", chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+        finally:
+            await cleanup_file(filepath)
+    else:
+        await context.bot.edit_message_text(text="عذرًا، لم أتمكن من تحميل المحتوى من هذا الرابط. 😔", chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+
+def main():
+    logger.info("بدء تشغيل البوت...")
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
