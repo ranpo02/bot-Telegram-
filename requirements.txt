@@ -1,15 +1,6 @@
-# Web Server
 Flask
 gunicorn
-
-# Telegram Bot
 python-telegram-bot[ext]
-
-# Downloader
 yt-dlp
-
-# Caching & Throttling
 redis
-
-# Environment Variables
 python-dotenv
