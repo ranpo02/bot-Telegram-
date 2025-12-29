@@ -15,6 +15,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- Flask App for Render Health Check ---
+# Gunicorn will look for this 'app' variable
 app = Flask(__name__)
 
 @app.route('/health')
@@ -24,7 +25,7 @@ def health_check():
 
 # --- Telegram Bot Setup ---
 def run_bot():
-    """Initializes and runs the Telegram bot."""
+    """Initializes and runs the Telegram bot in a separate thread."""
     application = Application.builder().token(config.BOT_TOKEN).build()
 
     # Add handlers
@@ -40,8 +41,10 @@ def run_bot():
 if __name__ == '__main__':
     # Run the bot in a separate thread
     bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True  # Allows main thread to exit even if bot_thread is running
     bot_thread.start()
 
-    # Run the Flask web server
-    logging.info(f"Starting Flask server on port {config.PORT}...")
+    # Run the Flask web server using Gunicorn in production
+    # This part is for local testing. Render will use its own command.
+    logging.info(f"Starting Flask server for local testing...")
     app.run(host='0.0.0.0', port=config.PORT)
