@@ -1,5 +1,5 @@
 # app.py
-# PROFESSIONAL MULTI-PLATFORM SMART DOWNLOAD ASSISTANT
+# FINAL, FIXED, AND IMPROVED MULTI-PLATFORM ASSISTANT
 
 import logging
 import os
@@ -35,6 +35,7 @@ YOUTUBE_PROXIES = [
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.INFO)
 
 try:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
@@ -50,7 +51,7 @@ except Exception as e:
 ANALYZING_MESSAGE = "⏳ جاري تحليل الرابط..."
 UPLOADING_MESSAGE = "⚡️ جاري رفع الملف..."
 INVALID_URL_MESSAGE = "⚠️ الرابط الذي أرسلته غير صالح."
-GENERIC_ERROR_MESSAGE = "❌ حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى."
+GENERIC_ERROR_MESSAGE = "❌ حدث خطأ غير متوقع. تم إبلاغ المطور."
 ANALYSIS_FAILED_MESSAGE = "❌ فشل تحليل الرابط. قد يكون المحتوى خاصًا، محذوفًا، أو من منصة غير مدعومة حاليًا."
 DOWNLOAD_CANCELED_MESSAGE = "✅ تم إلغاء العملية."
 
@@ -69,6 +70,12 @@ def format_bytes(b):
 class CoreError(Exception): pass
 class AnalysisError(CoreError): pass
 class DownloadError(CoreError): pass
+
+# --- CRITICAL FIX: Re-adding the missing function ---
+def is_valid_url(url: str) -> bool:
+    """Checks if the provided string is a valid URL."""
+    return bool(re.match(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', url))
+# --- END OF FIX ---
 
 async def run_ydl_analysis(url: str) -> dict:
     """Generic analysis function."""
@@ -137,20 +144,20 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption = f"**📸 انستغرام**\n**👤 الحساب:** {info.get('uploader')}"
             if 'entries' in info: # Carousel
                 caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من الصور/الفيديوهات."
-                keyboard = [[InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl_gallery_all_{msg.message_id}")]]
+                keyboard = [[InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl-gallery_all_{msg.message_id}")]]
             else: # Single video/image
-                keyboard = [[InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl_video_best_{msg.message_id}")]]
+                keyboard = [[InlineKeyboardButton("🎬 تحميل", callback_data=f"dl-video_best_{msg.message_id}")]]
 
         elif 'tiktok' in platform:
             caption = f"**🎵 تيك توك**\n**👤 الحساب:** {info.get('uploader')}\n**❤️ الإعجابات:** {format_count(info.get('like_count'))}"
             buttons = [
-                InlineKeyboardButton("🎬 فيديو (بدون علامة)", callback_data=f"dl_video_best_{msg.message_id}"),
-                InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data=f"dl_audio_best_{msg.message_id}")
+                InlineKeyboardButton("🎬 فيديو (بدون علامة)", callback_data=f"dl-video_best_{msg.message_id}"),
+                InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data=f"dl-audio_best_{msg.message_id}")
             ]
             keyboard = [buttons]
         
         else:
-            await msg.edit_text("تحليل هذا النوع من الروابط غير مدعوم بعد."); return
+            await msg.edit_text(f"تحليل منصة '{platform}' غير مدعوم بعد."); return
 
         keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel__{msg.message_id}")])
         await msg.delete()
@@ -176,48 +183,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = info.get('webpage_url')
     await query.edit_message_caption(caption=query.message.caption + "\n\n⏳ جاري التحميل، يرجى الانتظار...")
 
-    file_path = None
+    file_path, download_dir_path = None, None
     try:
-        if action == "dl":
-            is_audio = (format_id == 'audio') # Simplified logic, might need adjustment
-            file_path = await download_media(url, format_id, action == 'audio')
-            await query.edit_message_caption(caption=query.message.caption + f"\n{UPLOADING_MESSAGE}")
+        if action.startswith("dl-gallery"):
+            await query.edit_message_caption(caption=query.message.caption + "\n\n📥 جاري تحميل المنشورات...")
+            download_dir_path = DOWNLOAD_PATH / str(msg_id)
+            download_dir_path.mkdir(exist_ok=True)
             
-            if action == 'audio':
+            for i, entry in enumerate(info['entries']):
+                await query.edit_message_caption(caption=query.message.caption.split('\n\n📥')[0] + f"\n\n📥 ... {i+1}/{len(info['entries'])}")
+                await download_media(entry['url'], extra_opts={'outtmpl': str(download_dir_path / '%(id)s.%(ext)s')})
+
+            await query.edit_message_caption(caption=query.message.caption.split('\n\n📥')[0] + "\n\n🗜️ جاري ضغط الملفات...")
+            file_path = DOWNLOAD_PATH / f"{msg_id}.zip"
+            with zipfile.ZipFile(file_path, 'w') as zf:
+                for f in download_dir_path.iterdir(): zf.write(f, f.name)
+            
+            await query.edit_message_caption(caption=query.message.caption.split('\n\n🗜️')[0] + f"\n{UPLOADING_MESSAGE}")
+            with open(file_path, 'rb') as f: await context.bot.send_document(query.message.chat_id, f, caption=f"✅ **{info.get('uploader')}** - منشور متعدد")
+        
+        else: # Single file download
+            is_audio = (action == 'dl-audio')
+            file_path = await download_media(url, format_id, is_audio)
+            await query.edit_message_caption(caption=query.message.caption.split('\n\n⏳')[0] + f"\n{UPLOADING_MESSAGE}")
+            
+            if is_audio:
                 with open(file_path, 'rb') as f: await context.bot.send_audio(query.message.chat_id, f, title=info.get('title'), duration=info.get('duration'))
             else:
                 with open(file_path, 'rb') as f: await context.bot.send_video(query.message.chat_id, f, caption=f"✅ **{info.get('title')}**", parse_mode='Markdown', supports_streaming=True)
-            await query.message.delete()
-
-        elif action == "dl_gallery":
-            await query.edit_message_caption(caption=query.message.caption + "\n\n📥 جاري تحميل المنشورات...")
-            
-            download_dir = DOWNLOAD_PATH / str(msg_id)
-            download_dir.mkdir(exist_ok=True)
-            
-            for i, entry in enumerate(info['entries']):
-                await query.edit_message_caption(caption=query.message.caption + f"\n📥 ... {i+1}/{len(info['entries'])}")
-                await download_media(entry['url'], extra_opts={'outtmpl': str(download_dir / '%(id)s.%(ext)s')})
-
-            await query.edit_message_caption(caption=query.message.caption + "\n\n🗜️ جاري ضغط الملفات...")
-            zip_path = DOWNLOAD_PATH / f"{msg_id}.zip"
-            with zipfile.ZipFile(zip_path, 'w') as zf:
-                for f in download_dir.iterdir(): zf.write(f, f.name)
-            
-            await query.edit_message_caption(caption=query.message.caption + f"\n{UPLOADING_MESSAGE}")
-            with open(zip_path, 'rb') as f: await context.bot.send_document(query.message.chat_id, f, caption=f"✅ **{info.get('uploader')}** - منشور متعدد")
-            await query.message.delete()
-            file_path = str(zip_path) # For cleanup
+        
+        await query.message.delete()
 
     except (DownloadError, CoreError) as e: await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
     except Exception as e: logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
-        download_dir = DOWNLOAD_PATH / str(msg_id)
-        if os.path.exists(download_dir):
-            for f in download_dir.iterdir(): os.remove(f)
-            os.rmdir(download_dir)
+        if download_dir_path and os.path.exists(download_dir_path):
+            for f in download_dir_path.iterdir(): os.remove(f)
+            os.rmdir(download_dir_path)
         if msg_id in context.user_data: del context.user_data[msg_id]
+
+# --- IMPROVEMENT: Global Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    logging.error(f"Exception while handling an update:", exc_info=context.error)
+    # You can add your user ID to get notified of errors
+    # if DEVELOPER_CHAT_ID:
+    #     await context.bot.send_message(chat_id=DEVELOPER_CHAT_ID, text=f"Bot error: {context.error}")
 
 # ==============================================================================
 # 5. APPLICATION SETUP & ENTRY POINT
@@ -232,9 +244,14 @@ def main():
     logging.info(f"Health check server started on port {PORT}.")
 
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     app.add_handler(CallbackQueryHandler(button_handler))
+    
+    # --- IMPROVEMENT: Register the global error handler ---
+    app.add_error_handler(error_handler)
 
     logging.info("Starting Telegram bot polling...")
     app.run_polling()
