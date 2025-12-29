@@ -1,19 +1,31 @@
 # src/utils.py
+
+import os
 import logging
-import re
 
-URL_REGEX = r'https?://[^\s/$.?#].[^\s]*'
+# 1. إعداد مسجل الأحداث (Logger)
+# هذا هو الجزء الأهم: نقوم بإعداد الـ logger هنا
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-def setup_logger():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler("bot_activity.log"),
-            logging.StreamHandler()
-        ]
-    )
+# 2. إنشاء متغير logger يمكن استيراده من الملفات الأخرى
+# هذا هو السطر الذي كان مفقودًا أو غير صحيح
+logger = logging.getLogger(__name__)
 
-def find_url_in_text(text: str) -> str | None:
-    match = re.search(URL_REGEX, text)
-    return match.group(0) if match else None
+# 3. بقية الدوال المساعدة تبقى كما هي
+async def cleanup_file(file_path: str):
+    """دالة غير متزامنة لحذف ملف بعد استخدامه."""
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"تم حذف الملف المؤقت: {file_path}")
+    except Exception as e:
+        logger.error(f"خطأ أثناء حذف الملف {file_path}: {e}")
+
+def is_valid_url(url: str) -> bool:
+    """تحقق بسيط من أن النص هو رابط صالح."""
+    if not isinstance(url, str):
+        return False
+    return url.startswith("http://") or url.startswith("https://")
