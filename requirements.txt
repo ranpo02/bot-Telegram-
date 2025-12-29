@@ -1,7 +1,8 @@
 # requirements.txt
-aiogram==3.4.1
-yt-dlp
-python-dotenv
-ffmpeg-python
-pytube
 
+python-telegram-bot[ext]
+yt-dlp
+redis
+python-dotenv
+httpx
+beautifulsoup4
