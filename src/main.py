@@ -1,3 +1,6 @@
+ its own command.
+    logging.info(f"Starting Flask server for local testing...")
+    app(host='0.0.0.0', port=config.PORT)
 # src/main.py
 import logging
 import threading
@@ -14,15 +17,6 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# --- Flask App for Render Health Check ---
-# Gunicorn will look for this 'app' variable
-app = Flask(__name__)
-
-@app.route('/health')
-def health_check():
-    """Endpoint for Render's health check to keep the service alive."""
-    return "OK", 200
-
 # --- Telegram Bot Setup ---
 def run_bot():
     """Initializes and runs the Telegram bot in a separate thread."""
@@ -37,14 +31,22 @@ def run_bot():
     logging.info("Starting Telegram bot polling...")
     application.run_polling()
 
-# --- Main Execution ---
-if __name__ == '__main__':
-    # Run the bot in a separate thread
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True  # Allows main thread to exit even if bot_thread is running
-    bot_thread.start()
+# --- Start the Bot Thread ---
+# This code now runs as soon as the module is imported by Gunicorn
+logging.info("Setting up bot thread...")
+bot_thread = threading.Thread(target=run_bot)
+bot_thread.daemon = True
+bot_thread.start()
+logging.info("Bot thread started.")
 
-    # Run the Flask web server using Gunicorn in production
-    # This part is for local testing. Render will use its own command.
-    logging.info(f"Starting Flask server for local testing...")
-    app.run(host='0.0.0.0', port=config.PORT)
+# --- Flask App for Render Health Check ---
+# Gunicorn will look for this 'app' variable
+app = Flask(__name__)
+
+@app.route('/health')
+def health_check():
+    """Endpoint for Render's health check to keep the service alive."""
+    return "OK", 200
+
+# The 'if __name__ == '__main__':' block is no longer needed
+# as Gunicorn is the entry point in production.
