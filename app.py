@@ -1,5 +1,5 @@
 # app.py
-# UPGRADED VERSION with improvements
+# PROFESSIONAL MULTI-PLATFORM SMART DOWNLOAD ASSISTANT
 
 import logging
 import os
@@ -8,6 +8,7 @@ import asyncio
 import re
 import random
 from pathlib import Path
+import zipfile
 
 # --- Library Imports ---
 from flask import Flask
@@ -27,15 +28,13 @@ PORT = int(os.getenv("PORT", 10000))
 
 DOWNLOAD_PATH = Path("downloads")
 YOUTUBE_PROXIES = [
-    "154.3.236.202:3128",
-    "167.206.113.248:3128",
-    "115.114.77.133:9090",
-    "80.85.247.161:5555",
+    "154.3.236.202:3128", "167.206.113.248:3128",
+    "115.114.77.133:9090", "80.85.247.161:5555",
 ]
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("werkzeug").setLevel(logging.WARNING) # Quieter web server logs
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 try:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
@@ -48,153 +47,177 @@ except Exception as e:
 # 2. UI & MESSAGES
 # ==============================================================================
 
-def get_start_message(user_name: str) -> str:
-    return f"أهلاً بك يا {user_name}!\n\nأنا بوت تحميل الفيديوهات. أرسل لي أي رابط وسأقوم بتحميله لك."
-
-HELP_MESSAGE = "<b>مساعدة ℹ️</b>\n\n- أرسل رابط فيديو من (يوتيوب، تيك توك، انستغرام...).\n- سأقوم بتحميل الفيديو وإرساله لك بجودة مناسبة وسريعة.\n- يمكنك إلغاء التحميل في أي وقت."
-
-PROCESSING_MESSAGE = "⏳ جاري معالجة الرابط..."
-UPLOADING_MESSAGE = "⚡️ جاري رفع الفيديو..."
-INVALID_URL_MESSAGE = "⚠️ الرابط الذي أرسلته غير صالح. يرجى التأكد منه."
+ANALYZING_MESSAGE = "⏳ جاري تحليل الرابط..."
+UPLOADING_MESSAGE = "⚡️ جاري رفع الملف..."
+INVALID_URL_MESSAGE = "⚠️ الرابط الذي أرسلته غير صالح."
 GENERIC_ERROR_MESSAGE = "❌ حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى."
-DOWNLOAD_CANCELED_MESSAGE = "✅ تم إلغاء عملية التحميل."
+ANALYSIS_FAILED_MESSAGE = "❌ فشل تحليل الرابط. قد يكون المحتوى خاصًا، محذوفًا، أو من منصة غير مدعومة حاليًا."
+DOWNLOAD_CANCELED_MESSAGE = "✅ تم إلغاء العملية."
 
-def get_video_caption(title: str, url: str) -> str:
-    return f"✅ **{title}**\n\n🔗 [الرابط الأصلي]({url})"
-
-def get_main_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❓ مساعدة", callback_data='show_help')]])
-
-def get_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='cancel_download')]])
+def format_duration(s): return f"{s//60:02d}:{s%60:02d}" if s else "N/A"
+def format_count(n): return f"{n/1_000_000:.1f}M" if n and n >= 1_000_000 else f"{n/1_000:.1f}K" if n and n >= 1_000 else str(n or "N/A")
+def format_bytes(b):
+    if not b: return ""
+    p, n, l = 1024, 0, {0: '', 1: 'KB', 2: 'MB', 3: 'GB'}
+    while b > p and n < 3: b /= p; n += 1
+    return f"~{b:.1f}{l[n]}"
 
 # ==============================================================================
-# 3. CORE LOGIC
+# 3. CORE LOGIC (ANALYSIS & DOWNLOAD)
 # ==============================================================================
 
-class DownloadError(Exception): pass
-class VideoIsPrivateOrDeletedError(DownloadError): pass
-class AllProxiesFailedError(DownloadError): pass
+class CoreError(Exception): pass
+class AnalysisError(CoreError): pass
+class DownloadError(CoreError): pass
 
-def is_valid_url(url: str) -> bool:
-    return bool(re.match(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', url))
-
-async def cleanup_file(file_path: str):
+async def run_ydl_analysis(url: str) -> dict:
+    """Generic analysis function."""
+    ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'proxy': random.choice(YOUTUBE_PROXIES) if YOUTUBE_PROXIES else None}
     try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logging.info(f"Cleaned up file: {file_path}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return await asyncio.to_thread(ydl.extract_info, url, download=False)
     except Exception as e:
-        logging.error(f"Error cleaning up file {file_path}: {e}")
+        logging.error(f"Failed to analyze link {url}: {e}")
+        raise AnalysisError("فشل تحليل الرابط.")
 
-async def download_video(url: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int) -> tuple[str, str] | None:
+async def download_media(url: str, format_id: str = 'best', is_audio: bool = False, extra_opts: dict = None) -> str:
+    """Generic download function."""
     DOWNLOAD_PATH.mkdir(exist_ok=True)
-    
-    # IMPROVEMENT: Prefer faster, medium-quality formats.
-    ydl_opts_base = {
-        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    ydl_opts = {
+        'format': format_id,
         'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'progress_hooks': [lambda d: check_if_cancelled(d, context, chat_id, message_id)],
+        'proxy': random.choice(YOUTUBE_PROXIES) if YOUTUBE_PROXIES else None,
+        'quiet': True, 'no_warnings': True,
     }
+    if is_audio:
+        ydl_opts.update({'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}], 'outtmpl': str(DOWNLOAD_PATH / '%(id)s.mp3')})
+    if extra_opts:
+        ydl_opts.update(extra_opts)
     
-    shuffled_proxies = random.sample(YOUTUBE_PROXIES, len(YOUTUBE_PROXIES))
-
-    for proxy in shuffled_proxies + [None]:
-        ydl_opts = ydl_opts_base.copy()
-        ydl_opts['proxy'] = proxy
-        
-        try:
-            logging.info(f"Attempting download for {url} using proxy: {proxy or 'None'}")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                video_title = info.get('title', 'video')
-                file_path = ydl.prepare_filename(info)
-                logging.info(f"Download successful with proxy: {proxy or 'None'}")
-                return file_path, video_title
-        except DownloadError as e: # Catch our custom cancel error
-            raise e
-        except yt_dlp.utils.DownloadError as e:
-            if 'private' in str(e).lower() or 'unavailable' in str(e).lower():
-                raise VideoIsPrivateOrDeletedError("الفيديو خاص أو تم حذفه.")
-            logging.warning(f"Proxy {proxy or 'None'} failed for {url}: {e}")
-            continue
-    
-    raise AllProxiesFailedError("فشلت كل محاولات التحميل. قد يكون الرابط غير مدعوم أو أن الخوادم محظورة.")
-
-def check_if_cancelled(d, context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    """Hook for yt-dlp to check if the user cancelled the download."""
-    if context.user_data.get(f'cancel_{chat_id}_{message_id}', False):
-        raise DownloadError("تم إلغاء التحميل من قبل المستخدم.")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+            file_path = ydl.prepare_filename(info)
+            if is_audio: return os.path.splitext(file_path)[0] + ".mp3"
+            return file_path
+    except Exception as e:
+        logging.error(f"Download failed for {url}: {e}")
+        raise DownloadError("فشل التحميل.")
 
 # ==============================================================================
 # 4. TELEGRAM HANDLERS
 # ==============================================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_name = update.effective_user.first_name
-    await update.message.reply_html(text=get_start_message(user_name), reply_markup=get_main_keyboard())
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_html(f"أهلاً بك يا {update.effective_user.first_name}!\n\nأنا مساعد التحميل الذكي. أرسل لي أي رابط وسأقوم بتحليله لك.")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_html(text=HELP_MESSAGE, reply_markup=get_main_keyboard())
-
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     if not is_valid_url(url):
-        await update.message.reply_text(INVALID_URL_MESSAGE)
-        return
+        await update.message.reply_text(INVALID_URL_MESSAGE); return
 
-    processing_message = await update.message.reply_text(PROCESSING_MESSAGE, reply_markup=get_cancel_keyboard())
-    chat_id = update.effective_chat.id
-    message_id = processing_message.message_id
-    context.user_data[f'cancel_{chat_id}_{message_id}'] = False
+    msg = await update.message.reply_text(ANALYZING_MESSAGE)
     
-    video_path = None
     try:
-        video_path, video_title = await download_video(url, context, chat_id, message_id)
+        info = await run_ydl_analysis(url)
+        context.user_data[msg.message_id] = info
         
-        if not video_path: # Download was cancelled
-            return
+        platform = info.get('extractor_key', '').lower()
+        caption, keyboard = "", []
 
-        await processing_message.edit_text(UPLOADING_MESSAGE, reply_markup=None)
+        if 'youtube' in platform:
+            caption = f"**🎬 العنوان:** {info.get('title')}\n**👤 القناة:** {info.get('uploader')}\n**🕑 المدة:** {format_duration(info.get('duration'))}\n**👁️ المشاهدات:** {format_count(info.get('view_count'))}"
+            formats = sorted([f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height') in [360, 720]], key=lambda x: x.get('height', 0))
+            buttons = [InlineKeyboardButton(f"🎬 فيديو ({f.get('height')}p) {format_bytes(f.get('filesize') or f.get('filesize_approx'))}", callback_data=f"dl_video_{f['format_id']}_{msg.message_id}") for f in formats]
+            audio_format = max([f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'], key=lambda x: x.get('abr', 0), default=None)
+            if audio_format: buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3) {format_bytes(audio_format.get('filesize') or audio_format.get('filesize_approx'))}", callback_data=f"dl_audio_{audio_format['format_id']}_{msg.message_id}"))
+            keyboard = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+        elif 'instagram' in platform:
+            caption = f"**📸 انستغرام**\n**👤 الحساب:** {info.get('uploader')}"
+            if 'entries' in info: # Carousel
+                caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من الصور/الفيديوهات."
+                keyboard = [[InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl_gallery_all_{msg.message_id}")]]
+            else: # Single video/image
+                keyboard = [[InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl_video_best_{msg.message_id}")]]
+
+        elif 'tiktok' in platform:
+            caption = f"**🎵 تيك توك**\n**👤 الحساب:** {info.get('uploader')}\n**❤️ الإعجابات:** {format_count(info.get('like_count'))}"
+            buttons = [
+                InlineKeyboardButton("🎬 فيديو (بدون علامة)", callback_data=f"dl_video_best_{msg.message_id}"),
+                InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data=f"dl_audio_best_{msg.message_id}")
+            ]
+            keyboard = [buttons]
         
-        with open(video_path, 'rb') as video_file:
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=video_file,
-                caption=get_video_caption(video_title, url),
-                supports_streaming=True
-            )
-        await processing_message.delete()
-    except DownloadError as e:
-        await processing_message.edit_text(f"{e}")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred for URL {url}: {e}", exc_info=True)
-        await processing_message.edit_text(GENERIC_ERROR_MESSAGE)
-    finally:
-        if video_path:
-            await cleanup_file(video_path)
-        context.user_data.pop(f'cancel_{chat_id}_{message_id}', None)
+        else:
+            await msg.edit_text("تحليل هذا النوع من الروابط غير مدعوم بعد."); return
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel__{msg.message_id}")])
+        await msg.delete()
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=info.get('thumbnail'), caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except AnalysisError: await msg.edit_text(ANALYSIS_FAILED_MESSAGE)
+    except Exception as e: logging.error(f"Error in handle_link: {e}", exc_info=True); await msg.edit_text(GENERIC_ERROR_MESSAGE)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data == 'show_help':
-        try:
-            await query.edit_message_text(text=HELP_MESSAGE, reply_markup=get_main_keyboard())
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                pass # Ignore this error silently
+    action, format_id, msg_id_str = query.data.split('_', 2)
+    msg_id = int(msg_id_str)
+
+    if action == "cancel":
+        await query.message.delete(); return
+    
+    if msg_id not in context.user_data:
+        await query.edit_message_caption(caption=query.message.caption + "\n\n⚠️ انتهت صلاحية هذه الجلسة."); return
+
+    info = context.user_data[msg_id]
+    url = info.get('webpage_url')
+    await query.edit_message_caption(caption=query.message.caption + "\n\n⏳ جاري التحميل، يرجى الانتظار...")
+
+    file_path = None
+    try:
+        if action == "dl":
+            is_audio = (format_id == 'audio') # Simplified logic, might need adjustment
+            file_path = await download_media(url, format_id, action == 'audio')
+            await query.edit_message_caption(caption=query.message.caption + f"\n{UPLOADING_MESSAGE}")
+            
+            if action == 'audio':
+                with open(file_path, 'rb') as f: await context.bot.send_audio(query.message.chat_id, f, title=info.get('title'), duration=info.get('duration'))
             else:
-                raise e
-    elif query.data == 'cancel_download':
-        chat_id = query.message.chat_id
-        message_id = query.message.message_id
-        context.user_data[f'cancel_{chat_id}_{message_id}'] = True
-        await query.edit_message_text(DOWNLOAD_CANCELED_MESSAGE, reply_markup=None)
+                with open(file_path, 'rb') as f: await context.bot.send_video(query.message.chat_id, f, caption=f"✅ **{info.get('title')}**", parse_mode='Markdown', supports_streaming=True)
+            await query.message.delete()
+
+        elif action == "dl_gallery":
+            await query.edit_message_caption(caption=query.message.caption + "\n\n📥 جاري تحميل المنشورات...")
+            
+            download_dir = DOWNLOAD_PATH / str(msg_id)
+            download_dir.mkdir(exist_ok=True)
+            
+            for i, entry in enumerate(info['entries']):
+                await query.edit_message_caption(caption=query.message.caption + f"\n📥 ... {i+1}/{len(info['entries'])}")
+                await download_media(entry['url'], extra_opts={'outtmpl': str(download_dir / '%(id)s.%(ext)s')})
+
+            await query.edit_message_caption(caption=query.message.caption + "\n\n🗜️ جاري ضغط الملفات...")
+            zip_path = DOWNLOAD_PATH / f"{msg_id}.zip"
+            with zipfile.ZipFile(zip_path, 'w') as zf:
+                for f in download_dir.iterdir(): zf.write(f, f.name)
+            
+            await query.edit_message_caption(caption=query.message.caption + f"\n{UPLOADING_MESSAGE}")
+            with open(zip_path, 'rb') as f: await context.bot.send_document(query.message.chat_id, f, caption=f"✅ **{info.get('uploader')}** - منشور متعدد")
+            await query.message.delete()
+            file_path = str(zip_path) # For cleanup
+
+    except (DownloadError, CoreError) as e: await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
+    except Exception as e: logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
+    finally:
+        if file_path and os.path.exists(file_path): os.remove(file_path)
+        download_dir = DOWNLOAD_PATH / str(msg_id)
+        if os.path.exists(download_dir):
+            for f in download_dir.iterdir(): os.remove(f)
+            os.rmdir(download_dir)
+        if msg_id in context.user_data: del context.user_data[msg_id]
 
 # ==============================================================================
 # 5. APPLICATION SETUP & ENTRY POINT
@@ -204,26 +227,18 @@ flask_app = Flask(__name__)
 @flask_app.route('/health')
 def health_check(): return "OK", 200
 
-def run_web_server():
-    flask_app.run(host='0.0.0.0', port=PORT)
-
 def main():
-    web_thread = threading.Thread(target=run_web_server)
-    web_thread.daemon = True
-    web_thread.start()
+    threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=PORT), daemon=True).start()
     logging.info(f"Health check server started on port {PORT}.")
 
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     logging.info("Starting Telegram bot polling...")
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == '__main__':
-    if not BOT_TOKEN:
-        logging.fatal("FATAL: BOT_TOKEN environment variable not set.")
-    else:
-        main()
+    if not BOT_TOKEN: logging.fatal("FATAL: BOT_TOKEN not set.")
+    else: main()
