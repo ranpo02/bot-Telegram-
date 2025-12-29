@@ -78,7 +78,6 @@ def get_base_ydl_opts(url: str) -> dict:
             'Accept-Language': 'en-US,en;q=0.5'
         },
     }
-    # --- STRATEGY: Do NOT use proxy for Instagram ---
     if 'instagram.com' not in url:
         opts['proxy'] = PRIMARY_PROXY
     else:
@@ -88,7 +87,6 @@ def get_base_ydl_opts(url: str) -> dict:
 async def run_ydl_with_retry(url: str, ydl_opts: dict):
     """Runs a yt-dlp process with a fixed number of retries on failure."""
     last_exception = None
-    # For Instagram, don't retry as it's usually a hard block.
     retries = 1 if 'instagram.com' in url else MAX_RETRIES
     
     for attempt in range(retries):
@@ -142,7 +140,7 @@ async def download_media(url: str, format_id: str = 'best', is_audio: bool = Fal
         raise DownloadError("فشل التحميل بعد عدة محاولات.")
 
 # ==============================================================================
-# 4. TELEGRAM HANDLERS (EXPANDED FOR GENERIC SUPPORT)
+# 4. TELEGRAM HANDLERS (EXPANDED & FIXED)
 # ==============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,41 +160,41 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         platform = info.get('extractor_key', 'Generic').lower()
         caption, keyboard = "", []
         buttons = []
-
+        
         if 'youtube' in platform:
             caption = f"**🎬 يوتيوب**\n**العنوان:** {info.get('title')}\n**👤 القناة:** {info.get('uploader')}\n**🕑 المدة:** {format_duration(info.get('duration'))}\n**👁️ المشاهدات:** {format_count(info.get('view_count'))}"
             formats = sorted([f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height') in [360, 720]], key=lambda x: x.get('height', 0))
-            buttons.extend([InlineKeyboardButton(f"🎬 فيديو ({f.get('height')}p) {format_bytes(f.get('filesize') or f.get('filesize_approx'))}", callback_data=f"dl-video_{f['format_id']}_{msg.message_id}") for f in formats])
+            buttons.extend([InlineKeyboardButton(f"🎬 فيديو ({f.get('height')}p) {format_bytes(f.get('filesize') or f.get('filesize_approx'))}", callback_data=f"dl-video:{f['format_id']}:{msg.message_id}") for f in formats])
             audio_format = max([f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'], key=lambda x: x.get('abr', 0), default=None)
-            if audio_format: buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3) {format_bytes(audio_format.get('filesize') or audio_format.get('filesize_approx'))}", callback_data=f"dl-audio_{audio_format['format_id']}_{msg.message_id}"))
+            if audio_format: buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3) {format_bytes(audio_format.get('filesize') or audio_format.get('filesize_approx'))}", callback_data=f"dl-audio:{audio_format['format_id']}:{msg.message_id}"))
             keyboard = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
         elif 'instagram' in platform:
             caption = f"**📸 انستغرام**\n**👤 الحساب:** {info.get('uploader')}"
             if 'entries' in info:
                 caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من الصور/الفيديوهات."
-                keyboard = [[InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl-gallery_all_{msg.message_id}")]]
+                keyboard = [[InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl-gallery:all:{msg.message_id}")]]
             else:
-                keyboard = [[InlineKeyboardButton("🎬 تحميل", callback_data=f"dl-video_best_{msg.message_id}")]]
+                keyboard = [[InlineKeyboardButton("🎬 تحميل", callback_data=f"dl-video:best:{msg.message_id}")]]
 
         elif 'tiktok' in platform:
             caption = f"**🎵 تيك توك**\n**👤 الحساب:** {info.get('uploader')}\n**❤️ الإعجابات:** {format_count(info.get('like_count'))}"
             buttons = [
-                InlineKeyboardButton("🎬 فيديو (بدون علامة)", callback_data=f"dl-video_best_{msg.message_id}"),
-                InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data=f"dl-audio_best_{msg.message_id}")
+                InlineKeyboardButton("🎬 فيديو (بدون علامة)", callback_data=f"dl-video:best:{msg.message_id}"),
+                InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data=f"dl-audio:best:{msg.message_id}")
             ]
             keyboard = [buttons]
         
-        else: # --- NEW: Generic Fallback for other sites (Facebook, Twitter, etc.) ---
+        else:
             site_name = info.get('extractor_key', 'Website').capitalize()
             caption = f"**🌐 {site_name}**\n**العنوان:** {info.get('title', 'غير متوفر')}"
             buttons = [
-                InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl-video_best_{msg.message_id}"),
-                InlineKeyboardButton("🎵 تحميل الصوت", callback_data=f"dl-audio_best_{msg.message_id}")
+                InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl-video:best:{msg.message_id}"),
+                InlineKeyboardButton("🎵 تحميل الصوت", callback_data=f"dl-audio:best:{msg.message_id}")
             ]
             keyboard = [buttons]
 
-        keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel__{msg.message_id}")])
+        keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:none:{msg.message_id}")])
         
         thumbnail = info.get('thumbnail')
         if thumbnail:
@@ -212,7 +210,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # --- FIX: Use a more robust separator like ':' ---
     parts = query.data.split(':')
     action, format_id, msg_id_str = parts[0], parts[1], parts[2]
     msg_id = int(msg_id_str)
@@ -221,23 +218,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete(); return
     
     if msg_id not in context.user_data:
-        await query.edit_message_caption(caption=query.message.caption + "\n\n⚠️ انتهت صلاحية هذه الجلسة."); return
+        try: await query.edit_message_caption(caption=query.message.caption + "\n\n⚠️ انتهت صلاحية هذه الجلسة.")
+        except BadRequest: await context.bot.send_message(query.message.chat_id, "⚠️ انتهت صلاحية جلسة التحميل هذه.")
+        return
 
     info = context.user_data[msg_id]
     url = info.get('webpage_url')
-    await query.edit_message_caption(caption=query.message.caption + "\n\n⏳ جاري التحميل، يرجى الانتظار...")
+    
+    try: await query.edit_message_caption(caption=query.message.caption + "\n\n⏳ جاري التحميل، يرجى الانتظار...")
+    except BadRequest: await query.edit_message_text(text=query.message.text + "\n\n⏳ جاري التحميل، يرجى الانتظار...")
 
     file_path, download_dir_path = None, None
     try:
         if action.startswith("dl-gallery"):
-            # ... (gallery logic remains the same)
-            pass
+            await query.edit_message_caption(caption=query.message.caption + "\n\n📥 جاري تحميل المنشورات...")
+            download_dir_path = DOWNLOAD_PATH / str(msg_id)
+            download_dir_path.mkdir(exist_ok=True)
+            
+            for i, entry in enumerate(info['entries']):
+                await query.edit_message_caption(caption=query.message.caption.split('\n\n📥')[0] + f"\n\n📥 ... {i+1}/{len(info['entries'])}")
+                await download_media(entry['url'], extra_opts={'outtmpl': str(download_dir_path / '%(id)s.%(ext)s')})
+
+            await query.edit_message_caption(caption=query.message.caption.split('\n\n📥')[0] + "\n\n🗜️ جاري ضغط الملفات...")
+            file_path = DOWNLOAD_PATH / f"{msg_id}.zip"
+            with zipfile.ZipFile(file_path, 'w') as zf:
+                for f in download_dir_path.iterdir(): zf.write(f, f.name)
+            
+            await query.edit_message_caption(caption=query.message.caption.split('\n\n🗜️')[0] + f"\n{UPLOADING_MESSAGE}")
+            with open(file_path, 'rb') as f: await context.bot.send_document(query.message.chat_id, f, caption=f"✅ **{info.get('uploader')}** - منشور متعدد")
         
-        else: # Single file download
+        else:
             is_audio = (action == 'dl-audio')
             file_path = await download_media(url, format_id, is_audio)
-            await query.edit_message_caption(caption=query.message.caption.split('\n\n⏳')[0] + f"\n{UPLOADING_MESSAGE}")
             
+            try: await query.edit_message_caption(caption=query.message.caption.split('\n\n⏳')[0] + f"\n{UPLOADING_MESSAGE}")
+            except BadRequest: await query.edit_message_text(text=query.message.text.split('\n\n⏳')[0] + f"\n{UPLOADING_MESSAGE}")
+
             if is_audio:
                 with open(file_path, 'rb') as f: await context.bot.send_audio(query.message.chat_id, f, title=info.get('title'), duration=info.get('duration'))
             else:
@@ -248,13 +264,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (DownloadError, CoreError) as e: await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
     except Exception as e: logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
     finally:
-        # ... (cleanup logic remains the same)
-        pass
+        if file_path and os.path.exists(str(file_path)): os.remove(str(file_path))
+        if download_dir_path and os.path.exists(download_dir_path):
+            for f in download_dir_path.iterdir(): os.remove(f)
+            os.rmdir(download_dir_path)
+        if msg_id in context.user_data: del context.user_data[msg_id]
 
 # ==============================================================================
 # 5. APPLICATION SETUP & ENTRY POINT
 # ==============================================================================
-# ... (The rest of the file remains the same)
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Exception while handling an update:", exc_info=context.error)
 
