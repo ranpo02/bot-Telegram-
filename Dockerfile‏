@@ -12,6 +12,3 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application's code
 COPY . .
-
-# The command to run the application will be taken from the Procfile
-# No CMD or ENTRYPOINT needed here as Render uses the Procfile for 'web' services
