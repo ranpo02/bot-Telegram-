@@ -59,7 +59,7 @@ def format_bytes(b):
     return f"~{b:.1f}{l[n]}"
 
 def escape_markdown(text: str) -> str:
-    """Helper function to escape telegram markdown symbols."""
+    """Helper function to escape telegram markdown v2 symbols."""
     if not text: return ""
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
@@ -112,15 +112,17 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     ydl_opts = get_base_ydl_opts(url)
     ydl_opts['format'] = format_id
-    ydl_opts['outtmpl'] = str(DOWNLOAD_PATH / '%(id)s.%(ext)s')
     
     if is_audio:
         ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
         ydl_opts['outtmpl'] = str(DOWNLOAD_PATH / '%(id)s.%(ext)s') # Download original, then convert
+    else:
+        ydl_opts['outtmpl'] = str(DOWNLOAD_PATH / '%(id)s.%(ext)s')
 
     try:
         logging.info(f"YDL Download started for URL: {url} | Format: {format_id}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # This is a blocking call, run in a thread
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
             # --- FIX: Return the *actual* filename from ydl, not a guessed one ---
             return ydl.prepare_filename(info)
@@ -233,7 +235,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_audio:
                 with open(file_path, 'rb') as f: await context.bot.send_audio(query.message.chat_id, f, title=info.get('title'), duration=info.get('duration'))
             else:
-                # --- FIX: Use the sanitized title for the caption ---
                 safe_title = escape_markdown(info.get('title', ''))
                 with open(file_path, 'rb') as f: await context.bot.send_video(query.message.chat_id, f, caption=f"✅ **{safe_title}**", parse_mode=ParseMode.MARKDOWN_V2, supports_streaming=True)
         
