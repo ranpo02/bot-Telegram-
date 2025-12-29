@@ -2,26 +2,42 @@
 
 import os
 from dotenv import load_dotenv
+import asyncio # استيراد asyncio
 
 # تحميل متغيرات البيئة من ملف .env (مفيد للتطوير المحلي)
 load_dotenv()
 
 # --- توكن البوت والمعرفات ---
-# استخدمت القيم التي أرسلتها كقيم افتراضية تجريبية
-# في بيئة الإنتاج (Render), سيتم استخدام المتغيرات التي تضعها هناك
-BOT_TOKEN = os.getenv("BOT_TOKEN", "6689824298:AAFB9_iLrYK3DTecls9GQCFAa5idgsEFROo")
-ADMIN_ID = os.getenv("ADMIN_ID", "5898628858")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 # --- إعدادات Redis ---
 REDIS_URL = os.getenv("REDIS_URL")
-# إذا لم يتم توفير رابط Redis, سنقوم بتعطيل الميزات التي تعتمد عليه
 REDIS_ENABLED = REDIS_URL is not None
 
 # --- إعدادات البوت ---
-USER_THROTTLE_LIMIT = 5  # أقصى عدد طلبات للمستخدم الواحد
-USER_THROTTLE_PERIOD = 60  # خلال 60 ثانية
+USER_THROTTLE_LIMIT = 5
+USER_THROTTLE_PERIOD = 60
 
 # --- إعدادات التحميل ---
-DOWNLOAD_PATH = "downloads" # مجلد لتخزين الملفات المحملة مؤقتًا
+DOWNLOAD_PATH = "downloads"
 
-# --- قائمة البروكس
+# --- قائمة البروكسيات ---
+# قائمة البروكسيات التي سيتم تدويرها.
+PROXY_LIST = [
+    "http://154.3.236.202:3128",
+    "http://167.206.113.248:3128",
+    "http://115.114.77.133:9090",
+    "http://80.85.247.161:5555",
+]
+
+# --- متغيرات التحكم بالبروكسي ---
+# نستخدم قفل لضمان عدم حدوث تضارب عند الوصول للمتغير من عدة مهام متزامنة
+PROXY_INDEX_LOCK = asyncio.Lock()
+CURRENT_PROXY_INDEX = 0
+
+# --- التحقق من الإعدادات الأساسية ---
+if not BOT_TOKEN:
+    raise ValueError("خطأ: لم يتم العثور على BOT_TOKEN. يرجى إضافته إلى متغيرات البيئة.")
+
+os.makedirs(DOWNLOAD_PATH, exist_ok=True)
