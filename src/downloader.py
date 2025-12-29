@@ -1,90 +1,93 @@
 # src/downloader.py
+
 import asyncio
-import os
-import re
-import uuid
-import logging
-from typing import Optional, Tuple
+from yt_dlp import YoutubeDL
 
-class Downloader:
-    """أداة تحميل تستخدم قائمة من البروكسيات لتجاوز الحظر."""
+# استيراد الإعدادات والمتغيرات اللازمة من ملف config
+from .config import (
+    DOWNLOAD_PATH,
+    PROXY_LIST,
+    PROXY_INDEX_LOCK,
+)
+from .utils import logger
 
-    # === قائمة البروكسيات الناجحة التي وجدتها ===
-    WORKING_PROXIES = [
-        "http://157.66.3.34:1111",
-        "http://103.155.167.62:8080",
-        "http://41.254.48.192:1978",
-        "http://47.81.14.7:3129",
-        "http://80.85.247.161:5555" # هذا البروكسي نجح في الاتصال ولكنه غير مستقر، نجعله آخر خيار
-    ]
+# نحتاج إلى الوصول إلى المتغير العام لتحديثه
+import src.config
 
-    async def _run_command(self, command: str) -> Tuple[bool, str, str]:
-        """تشغيل أمر في الـ shell بشكل غير متزامن."""
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode == 0:
-            return True, stdout.decode('utf-8', errors='ignore'), stderr.decode('utf-8', errors='ignore')
-        else:
-            # لا نطبع الخطأ هنا، لأننا سنتعامل معه في الدالة الرئيسية
-            return False, stdout.decode('utf-8', errors='ignore'), stderr.decode('utf-8', errors='ignore')
-
-    def _cleanup(self, file_path: str):
-        """حذف الملف بعد إرساله."""
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logging.info(f"تم حذف الملف: {file_path}")
-            except OSError as e:
-                logging.error(f"خطأ أثناء حذف الملف {file_path}: {e}")
-
-    async def download_media(self, url: str, to_mp3: bool = False) -> Optional[Tuple[str, str]]:
-        """
-        تجربة التحميل باستخدام كل بروكسي في القائمة حتى ينجح.
-        """
-        download_id = str(uuid.uuid4())
-        temp_dir = "temp_downloads"
-        os.makedirs(temp_dir, exist_ok=True)
-        output_template = os.path.join(temp_dir, f"{download_id}.%(ext)s")
-        
-        # المرور على كل بروكسي في القائمة وتجربته
-        for i, proxy in enumerate(self.WORKING_PROXIES):
-            logging.info(f"محاولة التحميل (المحاولة {i+1}/{len(self.WORKING_PROXIES)}) باستخدام البروكسي: {proxy}")
-            
-            extra_opts = f"--proxy {proxy} --no-check-certificate --add-header 'User-Agent: Mozilla/5.0'"
-
-            if to_mp3:
-                command = f'yt-dlp {extra_opts} -x --audio-format mp3 -o "{output_template}" "{url}"'
-            else:
-                command = f'yt-dlp {extra_opts} -f "bestvideo[filesize<=50M]+bestaudio/best[filesize<=50M]/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
-
-            success, stdout, stderr = await self._run_command(command)
-
-            if success:
-                logging.info(f"نجح التحميل باستخدام البروكسي: {proxy}")
-                try:
-                    created_files = [f for f in os.listdir(temp_dir) if f.startswith(download_id)]
-                    if not created_files:
-                        continue # إذا نجح الأمر ولكن لم يتم إنشاء ملف، جرب البروكسي التالي
-                    
-                    filepath = os.path.join(temp_dir, created_files[0])
-                    title = "media"
-                    title_search = re.search(r'\[info\]\s+(.*?):\s+Downloading webpage', stdout, re.IGNORECASE)
-                    if title_search:
-                        title = title_search.group(1).strip()
-                    
-                    return filepath, title # إرجاع النتيجة فورًا عند النجاح
-                except Exception as e:
-                    logging.error(f"خطأ بعد نجاح التحميل: {e}")
-                    continue # جرب البروكسي التالي
-            else:
-                # طباعة الخطأ هنا لمعرفة سبب فشل البروكسي
-                logging.warning(f"فشل البروكسي {proxy}. الخطأ: {stderr.strip().splitlines()[-1]}")
-
-        # إذا فشلت كل البروكسيات
-        logging.error("فشلت كل البروكسيات في القائمة.")
+async def get_next_proxy() -> str | None:
+    """
+    دالة آمنة (thread-safe) للحصول على البروكسي التالي من القائمة بشكل دائري.
+    تستخدم قفلًا (Lock) لتجنب حالات التضارب (Race Conditions).
+    """
+    if not PROXY_LIST:
         return None
+    
+    async with PROXY_INDEX_LOCK:
+        # الوصول إلى المتغير العام وتحديثه
+        proxy = PROXY_LIST[src.config.CURRENT_PROXY_INDEX]
+        src.config.CURRENT_PROXY_INDEX = (src.config.CURRENT_PROXY_INDEX + 1) % len(PROXY_LIST)
+        logger.info(f"تم اختيار البروكسي التالي: {proxy}")
+        return proxy
+
+async def ytdlp_downloader(url: str) -> str | None:
+    """
+    يحاول تحميل الفيديو/الصوت باستخدام yt-dlp مع استخدام بروكسي متغير.
+    يُرجع مسار الملف عند النجاح, و None عند الفشل.
+    """
+    proxy = await get_next_proxy()
+    
+    if proxy:
+        logger.info(f"محاولة التحميل للرابط: {url} باستخدام البروكسي: {proxy.split('@')[-1]}") # لإخفاء بيانات الدخول لو وجدت
+    else:
+        logger.info(f"محاولة التحميل للرابط: {url} (بدون بروكسي)")
+
+    # إعدادات yt-dlp
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': f'{DOWNLOAD_PATH}/%(id)s.%(ext)s',
+        'noplaylist': True,
+        'quiet': True,
+        'merge_output_format': 'mp4',
+        'http_headers': { # محاكاة متصفح حقيقي
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+    }
+
+    # إضافة البروكسي إلى الإعدادات إذا كان متوفرًا
+    if proxy:
+        ydl_opts['proxy'] = proxy
+
+    try:
+        # تشغيل yt-dlp في thread منفصل لتجنب حظر الحلقة الرئيسية (event loop)
+        loop = asyncio.get_running_loop()
+        with YoutubeDL(ydl_opts) as ydl:
+            info = await loop.run_in_executor(
+                None, lambda: ydl.extract_info(url, download=True)
+            )
+            filepath = ydl.prepare_filename(info)
+            logger.info(f"نجح التحميل. الملف: {filepath}")
+            return filepath
+    except Exception as e:
+        logger.error(f"فشل التحميل (البروكسي: {proxy}): {e}")
+        return None
+
+# --- مدير التحميل ---
+# قائمة الأدوات التي سيتم تجربتها بالترتيب. حاليًا أداة واحدة.
+DOWNLOAD_TOOLS = [
+    ytdlp_downloader,
+    # يمكنك إضافة دوال تحميل أخرى هنا في المستقبل لتكون كخطة بديلة (fallback)
+]
+
+async def download_media(url: str) -> str | None:
+    """
+    مدير التحميل الذكي.
+    يجرب كل أداة في قائمة DOWNLOAD_TOOLS حتى تنجح إحداها.
+    """
+    for tool in DOWNLOAD_TOOLS:
+        filepath = await tool(url)
+        if filepath:
+            return filepath # نجحت الأداة، أرجع مسار الملف وتوقف
+    
+    logger.warning(f"فشلت جميع أدوات التحميل للرابط: {url}")
+    return None
