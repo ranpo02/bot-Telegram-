@@ -1,5 +1,5 @@
 # app.py
-# الكود الخاص بك مع تعديل المنفذ ليتوافق مع fly.io
+# الإصدار النهائي والمستقر - مع جميع الإصلاحات (أسماء الملفات، يوتيوب، انستغرام)
 
 import logging
 import os
@@ -17,16 +17,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.error import BadRequest
 from telegram.constants import ParseMode
 import yt_dlp
-import redis
 
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL")
-# تم تعديل هذا الجزء لاحقًا في نهاية الملف ليتوافق مع fly.io
 PORT = int(os.getenv("PORT", 8080)) 
+ADMIN_ID = "5898628858"
 
 DOWNLOAD_PATH = Path("downloads")
 PRIMARY_PROXY = "154.3.236.202:3128"
@@ -53,14 +51,10 @@ YOUTUBE_BLOCK_MESSAGE = "⚠️ يوتيوب يرفض الطلب حاليًا (�
 
 def format_duration(s): return f"{s//60:02d}:{s%60:02d}" if s else "N/A"
 def format_count(n): return f"{n/1_000_000:.1f}M" if n and n >= 1_000_000 else f"{n/1_000:.1f}K" if n and n >= 1_000 else str(n or "N/A")
-def format_bytes(b):
-    if not b: return ""
-    p, n, l = 1024, 0, {0: '', 1: 'KB', 2: 'MB', 3: 'GB'}
-    while b > p and n < 3: b /= p; n += 1
-    return f"~{b:.1f}{l[n]}"
 
 def escape_markdown(text: str) -> str:
     if not text: return ""
+    text = str(text)
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
@@ -80,6 +74,8 @@ def get_base_ydl_opts(url: str) -> dict:
         'quiet': True,
         'no_warnings': True,
         'http_headers': {'User-Agent': random.choice(USER_AGENTS), 'Accept-Language': 'en-US,en;q=0.5'},
+        # --- إصلاح: استخدام اسم ملف آمن دائمًا ---
+        'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
     }
     if 'instagram.com' not in url: opts['proxy'] = PRIMARY_PROXY
     else: logging.info("Instagram URL detected, bypassing proxy.")
@@ -110,17 +106,22 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     ydl_opts = get_base_ydl_opts(url)
     
-    ydl_opts['format'] = format_id
-    ydl_opts['outtmpl'] = str(DOWNLOAD_PATH / '%(id)s.%(ext)s')
+    ydl_opts['ffmpeg_location'] = '/usr/bin/ffmpeg'
     
     if is_audio:
+        ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
-    
+    else:
+        ydl_opts['format'] = format_id
+
     try:
-        logging.info(f"YDL Download started for URL: {url} | Format: {format_id}")
+        logging.info(f"YDL Download started for URL: {url} | Format: {ydl_opts.get('format')}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-            return ydl.prepare_filename(info)
+            original_filename = ydl.prepare_filename(info)
+            if is_audio:
+                return Path(original_filename).with_suffix('.mp3')
+            return original_filename
     except Exception as e:
         logging.error(f"Download failed for {url}: {e}")
         raise DownloadError("فشل التحميل.")
@@ -128,6 +129,16 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
 # ==============================================================================
 # 4. TELEGRAM HANDLERS
 # ==============================================================================
+
+async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
+    if not ADMIN_ID: return
+    report = (
+        f"🚨 {escape_markdown(error_type)} 🚨\n\n"
+        f"**المستخدم:** `{user_id}`\n"
+        f"**الرابط:** `{escape_markdown(url)}`\n"
+        f"**الخطأ:** `{escape_markdown(error_message)}`"
+    )
+    await context.bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(f"أهلاً بك يا {update.effective_user.first_name}!\n\nأنا مساعد التحميل الذكي. أرسل لي أي رابط وسأقوم بتحليله لك.")
@@ -148,7 +159,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         
         if 'youtube' in platform:
-            caption = f"**🎬 يوتيوب**\n**العنوان:** {escape_markdown(info.get('title'))}\n**👤 القناة:** {escape_markdown(info.get('uploader'))}\n**🕑 المدة:** {format_duration(info.get('duration'))}\n**👁️ المشاهدات:** {format_count(info.get('view_count'))}"
+            caption = (
+                f"**🎬 يوتيوب**\n"
+                f"**العنوان:** {escape_markdown(info.get('title'))}\n"
+                f"**👤 القناة:** {escape_markdown(info.get('uploader'))}\n"
+                f"**🕑 المدة:** {escape_markdown(format_duration(info.get('duration')))}\n"
+                f"**👁️ المشاهدات:** {escape_markdown(format_count(info.get('view_count')))}"
+            )
             
             video_formats = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('height', 0) <= 720]
             audio_formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
@@ -163,7 +180,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  buttons.append(InlineKeyboardButton(f"🎬 فيديو ({best_video.get('height')}p)", callback_data=f"dl-video:{best_video['format_id']}:{msg.message_id}"))
 
             if best_audio:
-                buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3)", callback_data=f"dl-audio:{best_audio['format_id']}:{msg.message_id}"))
+                buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3)", callback_data=f"dl-audio:best:{msg.message_id}"))
             
             keyboard = [buttons]
 
@@ -176,7 +193,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard = [[InlineKeyboardButton("🎬 تحميل", callback_data=f"dl-video:best:{msg.message_id}")]]
 
         elif 'tiktok' in platform:
-            caption = f"**🎵 تيك توك**\n**👤 الحساب:** {escape_markdown(info.get('uploader'))}\n**❤️ الإعجابات:** {format_count(info.get('like_count'))}"
+            caption = f"**🎵 تيك توك**\n**👤 الحساب:** {escape_markdown(info.get('uploader'))}\n**❤️ الإعجابات:** {escape_markdown(format_count(info.get('like_count')))}"
             buttons = [
                 InlineKeyboardButton("🎬 فيديو (بدون علامة)", callback_data=f"dl-video:best:{msg.message_id}"),
                 InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data=f"dl-audio:best:{msg.message_id}")
@@ -204,8 +221,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(text=caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    except AnalysisError as e: await msg.edit_text(str(e))
-    except Exception as e: logging.error(f"Error in handle_link: {e}", exc_info=True); await msg.edit_text(GENERIC_ERROR_MESSAGE)
+    except AnalysisError as e:
+        await report_error(context, update.effective_user.id, url, str(e), "خطأ تحليل")
+        await msg.edit_text(escape_markdown(str(e)), parse_mode=ParseMode.MARKDOWN_V2)
+    except Exception as e:
+        logging.error(f"Error in handle_link: {e}", exc_info=True)
+        await report_error(context, update.effective_user.id, url, str(e), "خطأ عام في handle_link")
+        await msg.edit_text(escape_markdown(GENERIC_ERROR_MESSAGE), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -243,11 +265,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except BadRequest as e:
         logging.warning(f"Could not edit message, probably unchanged: {e}")
 
-
     file_path, download_dir_path = None, None
     try:
         if action.startswith("dl-gallery"):
-            pass
+            download_dir_path = DOWNLOAD_PATH / f"gallery_{query.from_user.id}_{msg_id}"
+            download_dir_path.mkdir(exist_ok=True)
+            
+            ydl_opts = get_base_ydl_opts(url)
+            # --- إصلاح: استخدام اسم ملف آمن لمنشورات انستغرام ---
+            ydl_opts['outtmpl'] = str(download_dir_path / '%(id)s_%(playlist_index)s.%(ext)s')
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                await asyncio.to_thread(ydl.download, [url])
+
+            zip_path = DOWNLOAD_PATH / f"instagram_{msg_id}.zip"
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for entry in download_dir_path.iterdir():
+                    zipf.write(entry, entry.name)
+            
+            with open(zip_path, 'rb') as f:
+                await context.bot.send_document(query.message.chat_id, f, caption="✅ تم تحميل المنشور بنجاح كملف ZIP.")
+            
+            file_path = zip_path
         
         else:
             is_audio = (action == 'dl-audio')
@@ -270,8 +309,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.message.delete()
 
-    except (DownloadError, CoreError) as e: await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
-    except Exception as e: logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
+    except (DownloadError, CoreError) as e:
+        await report_error(context, query.from_user.id, url, str(e), "خطأ تحميل/معالجة")
+        await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
+    except Exception as e:
+        logging.error(f"Error in button_handler: {e}", exc_info=True)
+        await report_error(context, query.from_user.id, url, str(e), "خطأ عام في button_handler")
+        await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
     finally:
         if file_path and os.path.exists(str(file_path)): os.remove(str(file_path))
         if download_dir_path and os.path.exists(download_dir_path):
@@ -284,6 +328,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==============================================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Exception while handling an update:", exc_info=context.error)
+    if update and hasattr(update, 'effective_user') and update.effective_user:
+        user_id = update.effective_user.id
+    else:
+        user_id = "N/A"
+    await report_error(context, user_id, "N/A", str(context.error), "خطأ غير معالج (Handler)")
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
@@ -291,13 +340,10 @@ def health_check():
     return "OK", 200
 
 def run_flask():
-    # --- هذا هو السطر الوحيد الذي تم تعديله ---
-    # تم تغيير القيمة الافتراضية للمنفذ من 10000 إلى 8080 لتتطابق مع إعدادات fly.io
     port = int(os.environ.get('PORT', 8080))
     flask_app.run(host='0.0.0.0', port=port)
 
 def main():
-    # تشغيل خادم فلاسك في خيط منفصل لضمان استجابة البوت لفحوصات الصحة
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
