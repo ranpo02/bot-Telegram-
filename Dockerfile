@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # نسخ ملف المتطلبات
 COPY requirements.txt .
 
-# تثبيت المكتبات Python
+# تثبيت المكتبات Python (بما في ذلك gallery-dl)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # نسخ جميع الملفات
