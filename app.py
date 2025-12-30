@@ -1,5 +1,5 @@
 # app.py
-# 🚀 الإصدار 3.3: عزل البروكسيات (بناءً على الكود الأصلي v3.2)
+# 🚀 الإصدار 4.0: الحل العملي - استخدام البروكسي المؤقت
 
 import logging
 import os
@@ -29,7 +29,7 @@ ADMIN_ID = "5898628858"
 
 DOWNLOAD_PATH = Path("downloads")
 PRIMARY_PROXY = "154.3.236.202:3128"
-INSTA_PROXY = "115.114.77.133:9090" # البروكسي الجديد الخاص بانستغرام
+INSTA_PROXY = "115.114.77.133:9090"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
@@ -39,19 +39,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-# --- ✨ التعديل الوحيد: إزالة البروكسي العام وتمريره مباشرة إلى Instaloader ---
-# تم حذف الأسطر التالية:
-# logging.info(f"Setting proxy for Instaloader: {INSTA_PROXY}")
-# os.environ['HTTP_PROXY'] = f'http://{INSTA_PROXY}'
-# os.environ['HTTPS_PROXY'] = f'https://{INSTA_PROXY}'
-
-# --- إعداد Instaloader مع بروكسي مخصص ---
+# --- إعداد Instaloader بدون بروكسي مبدئيًا ---
 L = instaloader.Instaloader(
     download_pictures=True, download_videos=True, download_video_thumbnails=False,
     download_geotags=False, download_comments=False, save_metadata=False, compress_json=False,
-    max_connection_attempts=3,
-    # تمرير البروكسي مباشرة إلى سياق الطلبات
-    request_session_kwargs={'proxies': {'http': f'http://{INSTA_PROXY}', 'https': f'http://{INSTA_PROXY}'}}
+    max_connection_attempts=3
 )
 try:
     if os.path.exists("cookies.txt"):
@@ -71,14 +63,9 @@ GENERIC_ERROR_MESSAGE = "❌ حدث خطأ غير متوقع. تم إبلاغ ا
 ANALYSIS_FAILED_MESSAGE = "❌ فشل تحليل الرابط. قد يكون المحتوى خاصًا، محذوفًا، أو من منصة غير مدعومة حاليًا."
 SESSION_EXPIRED_MESSAGE = "⚠️ انتهت صلاحية هذه الجلسة. يرجى إرسال الرابط مرة أخرى."
 
-def format_duration(s): return f"{s//3600:02d}:{s//60%60:02d}:{s%60:02d}" if s and s > 3600 else f"{s//60:02d}:{s%60:02d}" if s else "غير محدد"
-def format_count(n): return f"{n/1_000_000:.1f}M" if n and n >= 1_000_000 else f"{n/1_000:.1f}K" if n and n >= 1_000 else str(n or "غير محدد")
-
 def escape_markdown(text: str) -> str:
     if not text: return ""
-    text = str(text)
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', str(text))
 
 # ==============================================================================
 # 3. CORE LOGIC (بدون تغيير)
@@ -109,13 +96,11 @@ async def run_ydl_analysis(url: str) -> dict:
     ydl_opts = get_base_ydl_opts(url)
     ydl_opts['skip_download'] = True
     try:
-        logging.info(f"YDL Analysis started for URL: {url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=False)
             if not info: raise AnalysisError("لم يتمكن yt-dlp من استخراج أي معلومات.")
             return info
     except Exception as e:
-        logging.error(f"YDL Analysis failed for {url}: {e}")
         raise AnalysisError(str(e))
 
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
@@ -127,13 +112,11 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     else:
         ydl_opts['format'] = format_id
     try:
-        logging.info(f"YDL Download started for URL: {url} | Format: {ydl_opts.get('format')}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
             original_filename = ydl.prepare_filename(info)
             return Path(original_filename).with_suffix('.mp3') if is_audio else original_filename
     except Exception as e:
-        logging.error(f"Download failed for {url}: {e}")
         raise DownloadError(str(e))
 
 # ==============================================================================
@@ -141,48 +124,29 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
 # ==============================================================================
 
 def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
-    caption = (f"🎬 **يوتيوب**\n\n"
-               f"р **العنوان:** {escape_markdown(info.get('title'))}\n"
-               f"👤 **القناة:** {escape_markdown(info.get('uploader'))}\n"
-               f"🕑 **المدة:** {escape_markdown(format_duration(info.get('duration')))}\n"
-               f"👁️ **المشاهدات:** {escape_markdown(format_count(info.get('view_count')))}")
+    caption = f"🎬 **يوتيوب**\n\nр **العنوان:** {escape_markdown(info.get('title'))}\n👤 **القناة:** {escape_markdown(info.get('uploader'))}"
     video_formats = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height', 0) <= 720]
-    audio_formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
     best_video = max(video_formats, key=lambda x: x.get('height', 0), default=None)
-    best_audio = max(audio_formats, key=lambda x: x.get('abr', 0), default=None)
     buttons = []
-    if best_video: buttons.append(InlineKeyboardButton(f"🎬 فيديو ({best_video.get('height')}p)", callback_data=f"dl:v:{best_video['format_id']}:{msg_id}"))
-    if best_audio: buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3)", callback_data=f"dl:a:best:{msg_id}"))
+    if best_video: buttons.append(InlineKeyboardButton(f"🎬 فيديو ({best_video.get('height')}p)", callback_data=f"yt:v:{best_video['format_id']}:{msg_id}"))
+    buttons.append(InlineKeyboardButton(f"🎵 صوت (MP3)", callback_data=f"yt:a:best:{msg_id}"))
     keyboard = [buttons]
-    if len(video_formats) > 1: keyboard.append([InlineKeyboardButton("🎞️ جودات أخرى", callback_data=f"qualities:v:na:{msg_id}")])
+    if len(video_formats) > 1: keyboard.append([InlineKeyboardButton("🎞️ جودات أخرى", callback_data=f"yt_qualities:v:na:{msg_id}")])
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")])
-    return caption, InlineKeyboardMarkup(keyboard)
-
-def build_instagram_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
-    uploader = info.get('uploader', 'غير معروف')
-    caption = f"📸 **انستغرام**\n\n👤 **الحساب:** {escape_markdown(uploader)}"
-    keyboard_buttons = []
-    if 'entries' in info:
-        caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من العناصر."
-        keyboard_buttons.append(InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl:ig_gallery:all:{msg_id}"))
-    elif info.get('duration'):
-        keyboard_buttons.append(InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl:v:best:{msg_id}"))
-    else:
-        keyboard_buttons.append(InlineKeyboardButton("🖼️ تحميل الصورة", callback_data=f"dl:v:best:{msg_id}"))
-    keyboard = [keyboard_buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
     return caption, InlineKeyboardMarkup(keyboard)
 
 def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     site_name = info.get('extractor_key', 'Website').capitalize()
-    caption = (f"🌐 **{escape_markdown(site_name)}**\n\n"
-               f"р **العنوان:** {escape_markdown(info.get('title', 'غير متوفر'))}")
-    buttons = [InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl:v:best:{msg_id}"),
-               InlineKeyboardButton("🎵 تحميل الصوت", callback_data=f"dl:a:best:{msg_id}")]
+    caption = f"🌐 **{escape_markdown(site_name)}**\n\nр **العنوان:** {escape_markdown(info.get('title', 'غير متوفر'))}"
+    buttons = [
+        InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"yt:v:best:{msg_id}"),
+        InlineKeyboardButton("🎵 تحميل الصوت", callback_data=f"yt:a:best:{msg_id}")
+    ]
     keyboard = [buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
     return caption, InlineKeyboardMarkup(keyboard)
 
 # ==============================================================================
-# 5. TELEGRAM HANDLERS (بدون تغيير)
+# 5. TELEGRAM HANDLERS (تعديل جوهري)
 # ==============================================================================
 
 async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
@@ -208,33 +172,46 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if 'instagram.com' in url:
-            match = re.search(r"/(p|reel|stories)/([^/]+)", url)
-            if not match: raise AnalysisError("لم يتم العثور على معرّف المنشور في الرابط.")
+            # --- ✨ التعديل الجوهري: تفعيل البروكسي مؤقتًا ---
+            logging.info(f"Temporarily setting proxy for Instaloader: {INSTA_PROXY}")
+            os.environ['HTTP_PROXY'] = f'http://{INSTA_PROXY}'
+            os.environ['HTTPS_PROXY'] = f'http://{INSTA_PROXY}'
             
-            shortcode = match.group(2)
-            post = await asyncio.to_thread(instaloader.Post.from_shortcode, L.context, shortcode)
-            
-            context.user_data[msg.message_id] = post
-            
-            caption = f"📸 **انستغرام**\n\n👤 **الحساب:** {escape_markdown(post.owner_username)}"
-            buttons = []
-            if post.is_video:
-                buttons.append(InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"insta:video:{shortcode}:{msg.message_id}"))
-            elif post.mediacount > 1:
-                caption += f"\n\nهذا المنشور يحتوي على **{post.mediacount}** من العناصر."
-                buttons.append(InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"insta:gallery:{shortcode}:{msg.message_id}"))
-            else:
-                buttons.append(InlineKeyboardButton("🖼️ تحميل الصورة", callback_data=f"insta:photo:{shortcode}:{msg.message_id}"))
-            
-            keyboard = [buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg.message_id}")]]
-            thumbnail_url = post.video_url if post.is_video else post.url
-            await msg.delete()
-            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=thumbnail_url, caption=caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
+            try:
+                match = re.search(r"/(p|reel|stories)/([^/]+)", url)
+                if not match: raise AnalysisError("لم يتم العثور على معرّف المنشور في الرابط.")
+                
+                shortcode = match.group(2)
+                post = await asyncio.to_thread(instaloader.Post.from_shortcode, L.context, shortcode)
+                
+                context.user_data[msg.message_id] = post
+                
+                caption = f"📸 **انستغرام**\n\n👤 **الحساب:** {escape_markdown(post.owner_username)}"
+                buttons = []
+                if post.is_video:
+                    buttons.append(InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"insta:video:{shortcode}:{msg.message_id}"))
+                elif post.mediacount > 1:
+                    caption += f"\n\nهذا المنشور يحتوي على **{post.mediacount}** من العناصر."
+                    buttons.append(InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"insta:gallery:{shortcode}:{msg.message_id}"))
+                else:
+                    buttons.append(InlineKeyboardButton("🖼️ تحميل الصورة", callback_data=f"insta:photo:{shortcode}:{msg.message_id}"))
+                
+                keyboard = [buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg.message_id}")]]
+                thumbnail_url = post.video_url if post.is_video else post.url
+                await msg.delete()
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=thumbnail_url, caption=caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
+
+            finally:
+                # --- ✨ التعديل الجوهري: إلغاء البروكسي دائمًا ---
+                logging.info("Unsetting temporary proxy.")
+                os.environ.pop('HTTP_PROXY', None)
+                os.environ.pop('HTTPS_PROXY', None)
 
         else:
             info = await run_ydl_analysis(url)
             context.user_data[msg.message_id] = info
             platform = info.get('extractor_key', 'Generic').lower()
+            
             if 'youtube' in platform:
                 caption, keyboard = build_youtube_ui(info, msg.message_id)
             else:
@@ -256,7 +233,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    handler_type, action, resource_id, msg_id_str = query.data.split(':')
+    parts = query.data.split(':')
+    handler_type, action, resource_id, msg_id_str = parts
     msg_id = int(msg_id_str)
 
     if handler_type == "cancel":
@@ -274,28 +252,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if handler_type == "insta":
-            post = context.user_data[msg_id]
-            target_dir = DOWNLOAD_PATH / post.shortcode
-            L.dirname_pattern = str(target_dir)
+            # --- ✨ التعديل الجوهري: تفعيل البروكسي مؤقتًا للتحميل ---
+            logging.info(f"Temporarily setting proxy for Instaloader download: {INSTA_PROXY}")
+            os.environ['HTTP_PROXY'] = f'http://{INSTA_PROXY}'
+            os.environ['HTTPS_PROXY'] = f'http://{INSTA_PROXY}'
             
-            if action == "video":
-                await asyncio.to_thread(L.download_post, post, "")
-                file = next(target_dir.glob('*.mp4'), None)
-                if file: await context.bot.send_video(chat_id=query.message.chat_id, video=open(file, 'rb'))
-            elif action == "photo":
-                await asyncio.to_thread(L.download_post, post, "")
-                file = next(target_dir.glob('*.jpg'), None)
-                if file: await context.bot.send_photo(chat_id=query.message.chat_id, photo=open(file, 'rb'))
-            elif action == "gallery":
-                await asyncio.to_thread(L.download_post, post, "")
-                zip_path = DOWNLOAD_PATH / f"{post.shortcode}.zip"
-                with zipfile.ZipFile(zip_path, 'w') as zipf:
-                    for f in sorted(target_dir.iterdir()): zipf.write(f, f.name)
-                await context.bot.send_document(chat_id=query.message.chat_id, document=open(zip_path, 'rb'))
+            try:
+                post = context.user_data[msg_id]
+                target_dir = DOWNLOAD_PATH / post.shortcode
+                L.dirname_pattern = str(target_dir)
+                
+                if action == "video":
+                    await asyncio.to_thread(L.download_post, post, "")
+                    file = next(target_dir.glob('*.mp4'), None)
+                    if file: await context.bot.send_video(chat_id=query.message.chat_id, video=open(file, 'rb'))
+                elif action == "photo":
+                    await asyncio.to_thread(L.download_post, post, "")
+                    file = next(target_dir.glob('*.jpg'), None)
+                    if file: await context.bot.send_photo(chat_id=query.message.chat_id, photo=open(file, 'rb'))
+                elif action == "gallery":
+                    await asyncio.to_thread(L.download_post, post, "")
+                    zip_path = DOWNLOAD_PATH / f"{post.shortcode}.zip"
+                    with zipfile.ZipFile(zip_path, 'w') as zipf:
+                        for f in sorted(target_dir.iterdir()): zipf.write(f, f.name)
+                    await context.bot.send_document(chat_id=query.message.chat_id, document=open(zip_path, 'rb'))
+                
+                await query.message.delete()
             
-            await query.message.delete()
+            finally:
+                # --- ✨ التعديل الجوهري: إلغاء البروكسي دائمًا ---
+                logging.info("Unsetting temporary proxy for download.")
+                os.environ.pop('HTTP_PROXY', None)
+                os.environ.pop('HTTPS_PROXY', None)
 
-        elif handler_type == "dl":
+        elif handler_type == "yt": # تم تغيير "dl" إلى "yt" ليكون أوضح
             info = context.user_data[msg_id]
             url = info.get('webpage_url')
             is_audio = (action == 'a')
@@ -308,16 +298,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.message.delete()
         
-        elif handler_type == "qualities":
+        elif handler_type == "yt_qualities":
             info = context.user_data[msg_id]
             video_formats = sorted([f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height')], key=lambda x: x.get('height', 0), reverse=True)
-            quality_buttons = [InlineKeyboardButton(f"{f.get('height')}p", callback_data=f"dl:v:{f['format_id']}:{msg_id}") for f in video_formats if f.get('height')]
+            quality_buttons = [InlineKeyboardButton(f"{f.get('height')}p", callback_data=f"yt:v:{f['format_id']}:{msg_id}") for f in video_formats if f.get('height')]
             keyboard = [quality_buttons[i:i + 3] for i in range(0, len(quality_buttons), 3)]
-            keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"back:na:na:{msg_id}")])
+            keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"yt_back:na:na:{msg_id}")])
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
-        elif handler_type == "back":
+        elif handler_type == "yt_back":
             info = context.user_data[msg_id]
             _, keyboard = build_youtube_ui(info, msg_id)
             await query.edit_message_reply_markup(reply_markup=keyboard)
