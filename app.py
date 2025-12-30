@@ -26,6 +26,7 @@ import redis
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
 PORT = int(os.getenv("PORT", 10000))
+ADMIN_ID = 5898628858  ## <-- تمت الإضافة
 
 DOWNLOAD_PATH = Path("downloads")
 PRIMARY_PROXY = "154.3.236.202:3128"
@@ -59,12 +60,7 @@ def format_bytes(b):
     return f"~{b:.1f}{l[n]}"
 
 def escape_markdown(text: str) -> str:
-    """
-    Helper function to escape telegram markdown v2 symbols.
-    FIX: Expanded to include all reserved characters.
-    """
     if not text: return ""
-    # As per Telegram Bot API documentation for MarkdownV2
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
@@ -90,7 +86,6 @@ def get_base_ydl_opts(url: str) -> dict:
     return opts
 
 async def run_ydl_analysis(url: str) -> dict:
-    """Analysis-only function. Does not download."""
     ydl_opts = get_base_ydl_opts(url)
     ydl_opts['skip_download'] = True
     
@@ -112,7 +107,6 @@ async def run_ydl_analysis(url: str) -> dict:
     raise AnalysisError("فشل تحليل الرابط بعد عدة محاولات.")
 
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
-    """Download-only function. Does not re-analyze."""
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     ydl_opts = get_base_ydl_opts(url)
     
@@ -165,7 +159,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if best_video and best_audio:
                 video_format_id = f"{best_video['format_id']}+{best_audio['format_id']}"
                 buttons.append(InlineKeyboardButton(f"🎬 فيديو ({best_video.get('height')}p)", callback_data=f"dl-video:{video_format_id}:{msg.message_id}"))
-            elif best_video: # Video only, no separate audio
+            elif best_video:
                  buttons.append(InlineKeyboardButton(f"🎬 فيديو ({best_video.get('height')}p)", callback_data=f"dl-video:{best_video['format_id']}:{msg.message_id}"))
 
             if best_audio:
@@ -210,8 +204,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(text=caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    except AnalysisError as e: await msg.edit_text(str(e))
-    except Exception as e: logging.error(f"Error in handle_link: {e}", exc_info=True); await msg.edit_text(GENERIC_ERROR_MESSAGE)
+    except AnalysisError as e:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ تحليل 🚨\n\nالمستخدم: {update.effective_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
+        await msg.edit_text(str(e))
+    except Exception as e:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ عام في handle_link 🚨\n\nالمستخدم: {update.effective_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
+        logging.error(f"Error in handle_link: {e}", exc_info=True); await msg.edit_text(GENERIC_ERROR_MESSAGE)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -232,7 +230,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = context.user_data[msg_id]
     url = info.get('webpage_url')
     
-    # FIX: Robustly handle editing both text and caption messages
     base_text = ""
     is_caption = False
     if query.message.caption:
@@ -254,7 +251,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path, download_dir_path = None, None
     try:
         if action.startswith("dl-gallery"):
-            # ... (Gallery logic)
             pass
         
         else:
@@ -278,8 +274,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.message.delete()
 
-    except (DownloadError, CoreError) as e: await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
-    except Exception as e: logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
+    except (DownloadError, CoreError) as e:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ تحميل/معالجة 🚨\n\nالمستخدم: {query.from_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
+        await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
+    except Exception as e:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ عام في button_handler 🚨\n\nالمستخدم: {query.from_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
+        logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
     finally:
         if file_path and os.path.exists(str(file_path)): os.remove(str(file_path))
         if download_dir_path and os.path.exists(download_dir_path):
