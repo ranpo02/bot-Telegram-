@@ -1,5 +1,5 @@
 # app.py
-# ✨ الإصدار الكامل والنهائي المدمج - مع كل الميزات والإصلاحات ✨
+# ✨ الإصدار النهائي الحقيقي - مع إصلاح Markdown وكل الميزات ✨
 
 import logging
 import os
@@ -237,7 +237,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.edit_message_caption(chat_id=query.message.chat_id, message_id=query.message.message_id, caption=query.message.caption_markdown_v2 + "\n\n⏳ جارٍ التحميل، قد يستغرق الأمر بعض الوقت\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        # --- الإصلاح الحاسم هنا ---
+        current_caption = query.message.caption_markdown_v2
+        loading_text = escape_markdown("\n\n⏳ جارٍ التحميل، قد يستغرق الأمر بعض الوقت...")
+        await context.bot.edit_message_caption(chat_id=query.message.chat_id, message_id=query.message.message_id, caption=current_caption + loading_text, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest: pass
     file_path, download_dir_path = None, None
     try:
@@ -256,7 +259,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             is_audio = (media_type == 'a')
             file_path = await run_ydl_download(url, format_id, is_audio)
-            await context.bot.edit_message_caption(chat_id=query.message.chat_id, message_id=query.message.message_id, caption=query.message.caption_markdown_v2.split('\n\n⏳')[0] + f"\n\n{UPLOADING_MESSAGE}", parse_mode=ParseMode.MARKDOWN_V2)
+            # --- والإصلاح الحاسم هنا أيضًا ---
+            base_caption = query.message.caption_markdown_v2.split('\n\n⏳')[0]
+            uploading_text = escape_markdown(f"\n\n{UPLOADING_MESSAGE}")
+            await context.bot.edit_message_caption(chat_id=query.message.chat_id, message_id=query.message.message_id, caption=base_caption + uploading_text, parse_mode=ParseMode.MARKDOWN_V2)
             if not file_path or not os.path.exists(file_path):
                 raise DownloadError("فشل إنشاء الملف النهائي على الخادم.")
             if is_audio:
@@ -308,3 +314,4 @@ if __name__ == '__main__':
         logging.fatal("FATAL: BOT_TOKEN not set.")
     else:
         main()
+
