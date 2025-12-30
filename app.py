@@ -1,5 +1,5 @@
 # app.py
-# 🚀 الإصدار 9.0: نسخة محسّنة مع إصلاحات شاملة وميزات جديدة
+# 🚀 الإصدار 10.0: نسخة نهائية محسّنة مع فحص الحجم الذكي
 
 import logging
 import os
@@ -41,7 +41,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 ]
 
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB - الحد الأقصى
 MAX_REQUESTS_PER_MINUTE = 5
 CLEANUP_INTERVAL = 1800  # 30 دقيقة
 FILE_MAX_AGE = 3600  # ساعة واحدة
@@ -205,7 +205,6 @@ INVALID_URL_MESSAGE = "⚠️ عذرًا، الرابط الذي أرسلته غ
 GENERIC_ERROR_MESSAGE = "❌ حدث خطأ غير متوقع."
 ANALYSIS_FAILED_MESSAGE = "❌ فشل التحميل."
 SESSION_EXPIRED_MESSAGE = "⚠️ انتهت صلاحية هذه الجلسة."
-FILE_TOO_LARGE_MESSAGE = "❌ عذرًا، حجم هذا الملف يتجاوز الحد المسموح به (50 ميغابايت)."
 RATE_LIMIT_MESSAGE = "⏱ لقد تجاوزت الحد المسموح من الطلبات (5 طلبات/دقيقة). يرجى الانتظار قليلاً."
 
 def escape_markdown(text: str) -> str:
@@ -245,6 +244,15 @@ def detect_platform(url: str) -> str:
         return 'tiktok'
     else:
         return 'generic'
+
+def format_size(size_bytes: int) -> str:
+    """تحويل الحجم من bytes إلى تنسيق قابل للقراءة"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 async def run_gallery_dl(url: str) -> list:
     """تشغيل gallery-dl لتحميل من إنستغرام"""
@@ -362,20 +370,30 @@ def build_youtube_ui(info: dict, msg_id: int) -> tuple:
         f"⏱ **المدة:** {duration_str}"
     )
     
+    # تصفية الصيغ: فقط جودة 720p أو أقل
     video_formats = [
         f for f in info.get('formats', [])
         if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height', 0) <= 720
     ]
     
+    # إضافة معلومات الحجم لكل صيغة
+    for fmt in video_formats:
+        size = fmt.get('filesize') or fmt.get('filesize_approx', 0)
+        fmt['_size_str'] = format_size(size) if size else "غير معروف"
+        fmt['_too_large'] = size > MAX_FILE_SIZE if size else False
+    
     best_video = max(video_formats, key=lambda x: x.get('height', 0), default=None)
     
     buttons = []
-    if best_video:
+    
+    # زر الفيديو الأفضل
+    if best_video and not best_video.get('_too_large', False):
         buttons.append(InlineKeyboardButton(
-            f"🎬 فيديو ({best_video.get('height')}p)",
+            f"🎬 فيديو ({best_video.get('height')}p - {best_video.get('_size_str')})",
             callback_data=f"yt:v:{best_video['format_id']}:{msg_id}"
         ))
     
+    # زر الصوت
     buttons.append(InlineKeyboardButton(
         f"🎵 صوت (MP3)",
         callback_data=f"yt:a:best:{msg_id}"
@@ -383,7 +401,9 @@ def build_youtube_ui(info: dict, msg_id: int) -> tuple:
     
     keyboard = [buttons]
     
-    if len(video_formats) > 1:
+    # زر الجودات الأخرى (إذا كان هناك أكثر من جودة متاحة)
+    available_formats = [f for f in video_formats if not f.get('_too_large', False)]
+    if len(available_formats) > 1:
         keyboard.append([InlineKeyboardButton(
             "🎞️ جودات أخرى",
             callback_data=f"yt_qualities:v:na:{msg_id}"
@@ -422,6 +442,7 @@ def build_qualities_ui(info: dict, msg_id: int) -> InlineKeyboardMarkup:
         if f.get('vcodec') != 'none' and f.get('acodec') != 'none'
     ]
     
+    # ترتيب حسب الجودة تنازلياً
     video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
     
     buttons = []
@@ -432,13 +453,16 @@ def build_qualities_ui(info: dict, msg_id: int) -> InlineKeyboardMarkup:
         if height and height not in seen_heights and height <= 1080:
             seen_heights.add(height)
             filesize = fmt.get('filesize') or fmt.get('filesize_approx', 0)
-            size_mb = filesize / (1024 * 1024) if filesize else 0
-            size_str = f" ({size_mb:.1f}MB)" if size_mb > 0 else ""
+            size_str = f" - {format_size(filesize)}" if filesize else ""
             
-            buttons.append([InlineKeyboardButton(
-                f"📹 {height}p{size_str}",
-                callback_data=f"yt:v:{fmt['format_id']}:{msg_id}"
-            )])
+            # تحديد إذا كان الحجم كبير جداً
+            if filesize and filesize > MAX_FILE_SIZE:
+                button_text = f"❌ {height}p{size_str} (كبير جداً)"
+                # لا نضيف callback لأنه غير متاح
+                buttons.append([InlineKeyboardButton(button_text, callback_data=f"ignore:na:na:{msg_id}")])
+            else:
+                button_text = f"📹 {height}p{size_str}"
+                buttons.append([InlineKeyboardButton(button_text, callback_data=f"yt:v:{fmt['format_id']}:{msg_id}")])
     
     buttons.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"back:na:na:{msg_id}")])
     buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")])
@@ -667,6 +691,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         return
     
+    # تجاهل الأزرار غير النشطة (الملفات الكبيرة)
+    if handler_type == "ignore":
+        await query.answer("⚠️ هذا الملف أكبر من 50 ميغابايت", show_alert=True)
+        return
+    
     # إلغاء العملية
     if handler_type == "cancel":
         await query.message.delete()
@@ -714,7 +743,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     
-    # التحقق من حجم الملف
+    # التحقق من حجم الملف قبل التحميل
     try:
         is_audio = (action == 'a')
         target_format = None
@@ -741,10 +770,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_format:
             file_size = target_format.get('filesize') or target_format.get('filesize_approx')
             if file_size and file_size > MAX_FILE_SIZE:
+                size_mb = file_size / (1024 * 1024)
                 await query.message.delete()
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=FILE_TOO_LARGE_MESSAGE
+                    text=f"❌ عذراً، حجم هذا الملف ({size_mb:.1f} ميغابايت) يتجاوز الحد المسموح به (50 ميغابايت).\n\n💡 جرّب اختيار جودة أقل أو تحميل الصوت فقط."
                 )
                 if msg_id in context.user_data:
                     del context.user_data[msg_id]
@@ -769,6 +799,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # التحميل
         is_audio = (action == 'a')
         file_path = await run_ydl_download(url, resource_id, is_audio)
+        
+        # فحص الحجم الفعلي بعد التحميل
+        if os.path.exists(file_path):
+            actual_size = os.path.getsize(file_path)
+            if actual_size > MAX_FILE_SIZE:
+                await query.message.delete()
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"❌ عذراً، حجم الملف المُحمّل ({format_size(actual_size)}) يتجاوز الحد المسموح به (50 ميغابايت)."
+                )
+                if msg_id in context.user_data:
+                    del context.user_data[msg_id]
+                return
         
         # تحديث الرسالة للرفع
         try:
