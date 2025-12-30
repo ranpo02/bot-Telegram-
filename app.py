@@ -1,5 +1,5 @@
 # app.py
-# 🚀 الإصدار 3.1: دمج Instaloader في الكود الأصلي (v2.1) بناءً على طلبك
+# 🚀 الإصدار 3.2: إضافة بروكسي لـ Instaloader على الكود الأصلي (v3.1)
 
 import logging
 import os
@@ -17,7 +17,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.error import BadRequest
 from telegram.constants import ParseMode
 import yt_dlp
-# --- ✨ التعديل 1: إضافة Instaloader ---
 import instaloader
 
 # ==============================================================================
@@ -29,7 +28,10 @@ PORT = int(os.getenv("PORT", 8080))
 ADMIN_ID = "5898628858"
 
 DOWNLOAD_PATH = Path("downloads")
+# --- ✨ التعديل 1: تعريف البروكسيات ---
 PRIMARY_PROXY = "154.3.236.202:3128"
+INSTA_PROXY = "115.114.77.133:9090" # البروكسي الجديد الخاص بانستغرام
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 ]
@@ -38,7 +40,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-# --- ✨ التعديل 2: إعداد Instaloader ---
+# --- ✨ التعديل 2: تطبيق البروكسي قبل إعداد Instaloader ---
+logging.info(f"Setting proxy for Instaloader: {INSTA_PROXY}")
+os.environ['HTTP_PROXY'] = f'http://{INSTA_PROXY}'
+os.environ['HTTPS_PROXY'] = f'https://{INSTA_PROXY}'
+
+# --- إعداد Instaloader ---
 L = instaloader.Instaloader(
     download_pictures=True, download_videos=True, download_video_thumbnails=False,
     download_geotags=False, download_comments=False, save_metadata=False, compress_json=False,
@@ -72,7 +79,7 @@ def escape_markdown(text: str) -> str:
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 # ==============================================================================
-# 3. CORE LOGIC (تعديل بسيط لفصل yt-dlp)
+# 3. CORE LOGIC (بدون تغيير)
 # ==============================================================================
 
 class CoreError(Exception): pass
@@ -82,7 +89,6 @@ class DownloadError(CoreError): pass
 def is_valid_url(url: str) -> bool:
     return bool(re.match(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', url))
 
-# --- تم تغيير اسم الدالة لتوضيح أنها خاصة بـ yt-dlp ---
 def get_base_ydl_opts(url: str) -> dict:
     opts = {
         'quiet': True, 'no_warnings': True,
@@ -90,7 +96,6 @@ def get_base_ydl_opts(url: str) -> dict:
         'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
         'ffmpeg_location': '/usr/bin/ffmpeg',
     }
-    # تم تبسيط هذا المنطق لأنه لم يعد يعالج انستغرام
     if 'facebook.com' in url:
         logging.info("Facebook URL detected. Using direct connection.")
     else:
@@ -135,7 +140,7 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
 
 def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     caption = (f"🎬 **يوتيوب**\n\n"
-               f"ር **العنوان:** {escape_markdown(info.get('title'))}\n"
+               f"р **العنوان:** {escape_markdown(info.get('title'))}\n"
                f"👤 **القناة:** {escape_markdown(info.get('uploader'))}\n"
                f"🕑 **المدة:** {escape_markdown(format_duration(info.get('duration')))}\n"
                f"👁️ **المشاهدات:** {escape_markdown(format_count(info.get('view_count')))}")
@@ -168,14 +173,14 @@ def build_instagram_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
 def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     site_name = info.get('extractor_key', 'Website').capitalize()
     caption = (f"🌐 **{escape_markdown(site_name)}**\n\n"
-               f"ር **العنوان:** {escape_markdown(info.get('title', 'غير متوفر'))}")
+               f"р **العنوان:** {escape_markdown(info.get('title', 'غير متوفر'))}")
     buttons = [InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl:v:best:{msg_id}"),
                InlineKeyboardButton("🎵 تحميل الصوت", callback_data=f"dl:a:best:{msg_id}")]
     keyboard = [buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
     return caption, InlineKeyboardMarkup(keyboard)
 
 # ==============================================================================
-# 5. TELEGRAM HANDLERS (تعديل جوهري)
+# 5. TELEGRAM HANDLERS (بدون تغيير)
 # ==============================================================================
 
 async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
@@ -200,7 +205,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(ANALYZING_MESSAGE)
 
     try:
-        # --- ✨ التعديل 3: التوجيه حسب نوع الرابط ---
         if 'instagram.com' in url:
             match = re.search(r"/(p|reel|stories)/([^/]+)", url)
             if not match: raise AnalysisError("لم يتم العثور على معرّف المنشور في الرابط.")
@@ -208,7 +212,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shortcode = match.group(2)
             post = await asyncio.to_thread(instaloader.Post.from_shortcode, L.context, shortcode)
             
-            # تخزين كائن post لاستخدامه في button_handler
             context.user_data[msg.message_id] = post
             
             caption = f"📸 **انستغرام**\n\n👤 **الحساب:** {escape_markdown(post.owner_username)}"
@@ -227,13 +230,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(chat_id=update.effective_chat.id, photo=thumbnail_url, caption=caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
         else:
-            # استخدام منطق yt-dlp القديم كما هو
             info = await run_ydl_analysis(url)
             context.user_data[msg.message_id] = info
             platform = info.get('extractor_key', 'Generic').lower()
             if 'youtube' in platform:
                 caption, keyboard = build_youtube_ui(info, msg.message_id)
-            else: # TikTok, Facebook, etc.
+            else:
                 caption, keyboard = build_generic_ui(info, msg.message_id)
             
             thumbnail = info.get('thumbnail')
@@ -252,7 +254,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    # --- ✨ التعديل 4: تقسيم المعالج إلى قسمين ---
     handler_type, action, resource_id, msg_id_str = query.data.split(':')
     msg_id = int(msg_id_str)
 
@@ -292,7 +293,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.message.delete()
 
-        elif handler_type == "dl": # هذا هو معالج yt-dlp القديم
+        elif handler_type == "dl":
             info = context.user_data[msg_id]
             url = info.get('webpage_url')
             is_audio = (action == 'a')
@@ -305,13 +306,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.message.delete()
         
-        # (منطق qualities و back يبقى كما هو)
         elif handler_type == "qualities":
-            # ...
-            pass
+            info = context.user_data[msg_id]
+            video_formats = sorted([f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height')], key=lambda x: x.get('height', 0), reverse=True)
+            quality_buttons = [InlineKeyboardButton(f"{f.get('height')}p", callback_data=f"dl:v:{f['format_id']}:{msg_id}") for f in video_formats if f.get('height')]
+            keyboard = [quality_buttons[i:i + 3] for i in range(0, len(quality_buttons), 3)]
+            keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"back:na:na:{msg_id}")])
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
         elif handler_type == "back":
-            # ...
-            pass
+            info = context.user_data[msg_id]
+            _, keyboard = build_youtube_ui(info, msg_id)
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+            return
 
     except Exception as e:
         logging.error(f"Critical error in button_handler: {e}", exc_info=True)
