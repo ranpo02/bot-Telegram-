@@ -1,26 +1,35 @@
-# 1. ابدأ من صورة بايثون رسمية
+# استخدام Python 3.11 slim
 FROM python:3.11-slim
 
-# 2. قم بتثبيت الأدوات الأساسية و ffmpeg
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    git
+# تعيين متغيرات البيئة
+ENV PYTHONUNBUFFERED=1
 
-# 3. جهز مجلد العمل
+# تعيين مجلد العمل
 WORKDIR /app
 
-# 4. انسخ ملف المتطلبات فقط
+# تثبيت التبعيات النظامية (ffmpeg + sqlite3)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    sqlite3 \
+    libsqlite3-dev \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# نسخ ملف المتطلبات
 COPY requirements.txt .
 
-# 5. قم بتثبيت مكتبات بايثون
+# تثبيت المكتبات Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. قم بتثبيت gallery-dl
-# نستخدم pip لتثبيت أحدث إصدار لضمان أفضل توافق
-RUN pip install --no-cache-dir gallery-dl
-
-# 7. انسخ باقي ملفات المشروع
+# نسخ جميع الملفات
 COPY . .
 
-# 8. حدد الأمر لتشغيل البوت
+# إنشاء مجلد التحميلات
+RUN mkdir -p downloads
+
+# تعريف المنفذ
+EXPOSE 8080
+
+# تشغيل البوت
 CMD ["python", "app.py"]
