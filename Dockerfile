@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # 5. قم بتثبيت مكتبات بايثون (مع إضافة instaloader)
-RUN pip install --no-cache-dir -r requirements.txt pysocks && pip install --upgrade instaloader
+RUN pip install --no-cache-dir -r requirements.txt instaloader
 # 6. انسخ باقي ملفات المشروع
 COPY . .
 
