@@ -1,5 +1,5 @@
 # app.py
-# 🚀 الإصدار النهائي 2.0: إصلاح خطأ Markdown + دعم ذكي لصور انستغرام
+# 🚀 الإصدار النهائي 2.1: إصلاح تحليل انستغرام (ignoreerrors=True)
 
 import logging
 import os
@@ -91,10 +91,17 @@ def get_base_ydl_opts(url: str) -> dict:
 async def run_ydl_analysis(url: str) -> dict:
     ydl_opts = get_base_ydl_opts(url)
     ydl_opts['skip_download'] = True
+    # --- ✨ الإصلاح الحاسم هنا: تجاهل الأخطاء أثناء التحليل للسماح بمعالجة الصور ✨ ---
+    ydl_opts['ignoreerrors'] = True
+    
     try:
         logging.info(f"YDL Analysis started for URL: {url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return await asyncio.to_thread(ydl.extract_info, url, download=False)
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+            # إذا لم يتم استخراج أي معلومات على الإطلاق، فهذا فشل حقيقي
+            if not info:
+                raise AnalysisError("لم يتمكن yt-dlp من استخراج أي معلومات.")
+            return info
     except Exception as e:
         logging.error(f"YDL Analysis failed for {url}: {e}")
         raise AnalysisError(str(e))
@@ -120,7 +127,7 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
         raise DownloadError(str(e))
 
 # ==============================================================================
-# 4. UI BUILDERS
+# 4. UI BUILDERS (No changes)
 # ==============================================================================
 
 def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
@@ -147,22 +154,16 @@ def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     return caption, InlineKeyboardMarkup(keyboard)
 
 def build_instagram_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
-    # --- ✨ منطق انستغرام الجديد والأكثر ذكاءً ✨ ---
     uploader = info.get('uploader', 'غير معروف')
     caption = f"📸 **انستغرام**\n\n👤 **الحساب:** {escape_markdown(uploader)}"
     keyboard_buttons = []
-    
     if 'entries' in info:
-        # هذا معرض (Carousel) أو ستوري متعدد الأجزاء
         caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من العناصر."
         keyboard_buttons.append(InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl:ig_gallery:all:{msg_id}"))
     elif info.get('duration'):
-        # هذا فيديو واحد (Reel أو فيديو عادي)
         keyboard_buttons.append(InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl:v:best:{msg_id}"))
     else:
-        # إذا لم يكن معرضًا ولا فيديو، فهو صورة واحدة
         keyboard_buttons.append(InlineKeyboardButton("🖼️ تحميل الصورة", callback_data=f"dl:v:best:{msg_id}"))
-        
     keyboard = [keyboard_buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
     return caption, InlineKeyboardMarkup(keyboard)
 
@@ -180,7 +181,7 @@ def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     return caption, InlineKeyboardMarkup(keyboard)
 
 # ==============================================================================
-# 5. TELEGRAM HANDLERS
+# 5. TELEGRAM HANDLERS (No changes)
 # ==============================================================================
 
 async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
@@ -223,7 +224,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (AnalysisError, Exception) as e:
         await report_error(context, update.effective_user.id, url, str(e), "خطأ تحليل")
         try:
-            # --- ✨ الإصلاح الحاسم هنا: تهريب رسالة الخطأ للمستخدم ---
             await msg.edit_text(escape_markdown(ANALYSIS_FAILED_MESSAGE), parse_mode=ParseMode.MARKDOWN_V2)
         except BadRequest:
             await msg.edit_text(escape_markdown(GENERIC_ERROR_MESSAGE), parse_mode=ParseMode.MARKDOWN_V2)
