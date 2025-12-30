@@ -10,8 +10,8 @@ WORKDIR /app
 # 4. انسخ ملف المتطلبات فقط
 COPY requirements.txt .
 
-# 5. قم بتثبيت مكتبات بايثون
-RUN pip install --no-cache-dir -r requirements.txt
+# 5. قم بتثبيت مكتبات بايثون (مع إضافة instaloader)
+RUN pip install --no-cache-dir -r requirements.txt instaloader
 
 # 6. انسخ باقي ملفات المشروع
 COPY . .
