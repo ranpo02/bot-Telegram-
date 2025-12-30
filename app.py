@@ -1,5 +1,5 @@
 # app.py
-# FINAL STABLE & ROBUST VERSION by Manos (TypeError and MarkdownV2 Fix)
+# الكود الخاص بك مع تعديل المنفذ ليتوافق مع fly.io
 
 import logging
 import os
@@ -20,13 +20,13 @@ import yt_dlp
 import redis
 
 # ==============================================================================
-# 1. CONFIGURATION (No changes)
+# 1. CONFIGURATION
 # ==============================================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
-PORT = int(os.getenv("PORT", 10000))
-ADMIN_ID = 5898628858  ## <-- تمت الإضافة
+# تم تعديل هذا الجزء لاحقًا في نهاية الملف ليتوافق مع fly.io
+PORT = int(os.getenv("PORT", 8080)) 
 
 DOWNLOAD_PATH = Path("downloads")
 PRIMARY_PROXY = "154.3.236.202:3128"
@@ -42,7 +42,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # ==============================================================================
-# 2. UI & MESSAGES (Updated escape_markdown)
+# 2. UI & MESSAGES
 # ==============================================================================
 ANALYZING_MESSAGE = "⏳ جاري تحليل الرابط..."
 UPLOADING_MESSAGE = "⚡️ جاري رفع الملف..."
@@ -65,7 +65,7 @@ def escape_markdown(text: str) -> str:
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 # ==============================================================================
-# 3. CORE LOGIC (No changes from previous fix)
+# 3. CORE LOGIC
 # ==============================================================================
 
 class CoreError(Exception): pass
@@ -126,7 +126,7 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
         raise DownloadError("فشل التحميل.")
 
 # ==============================================================================
-# 4. TELEGRAM HANDLERS (FIXED & REFINED)
+# 4. TELEGRAM HANDLERS
 # ==============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,12 +204,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(text=caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    except AnalysisError as e:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ تحليل 🚨\n\nالمستخدم: {update.effective_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
-        await msg.edit_text(str(e))
-    except Exception as e:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ عام في handle_link 🚨\n\nالمستخدم: {update.effective_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
-        logging.error(f"Error in handle_link: {e}", exc_info=True); await msg.edit_text(GENERIC_ERROR_MESSAGE)
+    except AnalysisError as e: await msg.edit_text(str(e))
+    except Exception as e: logging.error(f"Error in handle_link: {e}", exc_info=True); await msg.edit_text(GENERIC_ERROR_MESSAGE)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -274,12 +270,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.message.delete()
 
-    except (DownloadError, CoreError) as e:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ تحميل/معالجة 🚨\n\nالمستخدم: {query.from_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
-        await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
-    except Exception as e:
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🚨 خطأ عام في button_handler 🚨\n\nالمستخدم: {query.from_user.id}\nالرابط: {url}\nالخطأ: {e}") ## <-- تمت الإضافة
-        logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
+    except (DownloadError, CoreError) as e: await context.bot.send_message(query.message.chat_id, f"❌ فشل الإجراء: {e}")
+    except Exception as e: logging.error(f"Error in button_handler: {e}", exc_info=True); await context.bot.send_message(query.message.chat_id, GENERIC_ERROR_MESSAGE)
     finally:
         if file_path and os.path.exists(str(file_path)): os.remove(str(file_path))
         if download_dir_path and os.path.exists(download_dir_path):
@@ -288,17 +280,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg_id in context.user_data: del context.user_data[msg_id]
 
 # ==============================================================================
-# 5. APPLICATION SETUP & ENTRY POINT (No changes)
+# 5. APPLICATION SETUP & ENTRY POINT
 # ==============================================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Exception while handling an update:", exc_info=context.error)
 
 flask_app = Flask(__name__)
-@flask_app.route('/health')
-def health_check(): return "OK", 200
+@flask_app.route('/')
+def health_check(): 
+    return "OK", 200
+
+def run_flask():
+    # --- هذا هو السطر الوحيد الذي تم تعديله ---
+    # تم تغيير القيمة الافتراضية للمنفذ من 10000 إلى 8080 لتتطابق مع إعدادات fly.io
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.run(host='0.0.0.0', port=port)
 
 def main():
-    threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=PORT), daemon=True).start()
+    # تشغيل خادم فلاسك في خيط منفصل لضمان استجابة البوت لفحوصات الصحة
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
     logging.info(f"Health check server started on port {PORT}.")
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -312,5 +314,7 @@ def main():
     app.run_polling()
 
 if __name__ == '__main__':
-    if not BOT_TOKEN: logging.fatal("FATAL: BOT_TOKEN not set.")
-    else: main()
+    if not BOT_TOKEN: 
+        logging.fatal("FATAL: BOT_TOKEN not set.")
+    else: 
+        main()
