@@ -1,5 +1,5 @@
 # app.py
-# 🚀 الإصدار 3.2: إضافة بروكسي لـ Instaloader على الكود الأصلي (v3.1)
+# 🚀 الإصدار 3.3: عزل البروكسيات (بناءً على الكود الأصلي v3.2)
 
 import logging
 import os
@@ -28,7 +28,6 @@ PORT = int(os.getenv("PORT", 8080))
 ADMIN_ID = "5898628858"
 
 DOWNLOAD_PATH = Path("downloads")
-# --- ✨ التعديل 1: تعريف البروكسيات ---
 PRIMARY_PROXY = "154.3.236.202:3128"
 INSTA_PROXY = "115.114.77.133:9090" # البروكسي الجديد الخاص بانستغرام
 
@@ -40,16 +39,19 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-# --- ✨ التعديل 2: تطبيق البروكسي قبل إعداد Instaloader ---
-logging.info(f"Setting proxy for Instaloader: {INSTA_PROXY}")
-os.environ['HTTP_PROXY'] = f'http://{INSTA_PROXY}'
-os.environ['HTTPS_PROXY'] = f'https://{INSTA_PROXY}'
+# --- ✨ التعديل الوحيد: إزالة البروكسي العام وتمريره مباشرة إلى Instaloader ---
+# تم حذف الأسطر التالية:
+# logging.info(f"Setting proxy for Instaloader: {INSTA_PROXY}")
+# os.environ['HTTP_PROXY'] = f'http://{INSTA_PROXY}'
+# os.environ['HTTPS_PROXY'] = f'https://{INSTA_PROXY}'
 
-# --- إعداد Instaloader ---
+# --- إعداد Instaloader مع بروكسي مخصص ---
 L = instaloader.Instaloader(
     download_pictures=True, download_videos=True, download_video_thumbnails=False,
     download_geotags=False, download_comments=False, save_metadata=False, compress_json=False,
-    max_connection_attempts=3
+    max_connection_attempts=3,
+    # تمرير البروكسي مباشرة إلى سياق الطلبات
+    request_session_kwargs={'proxies': {'http': f'http://{INSTA_PROXY}', 'https': f'http://{INSTA_PROXY}'}}
 )
 try:
     if os.path.exists("cookies.txt"):
