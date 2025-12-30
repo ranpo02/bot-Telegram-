@@ -1,6 +1,19 @@
-Flask
-gunicorn
-python-telegram-bot[ext]
-yt-dlp
-redis
-python-dotenv
+# requirements.txt
+# 📦 جميع المكتبات المطلوبة للبوت
+
+# Telegram Bot
+python-telegram-bot>=20.7
+
+# تحميل الفيديوهات
+yt-dlp>=2024.3.10
+gallery-dl>=1.27.0
+
+# Flask للـ health check
+Flask>=3.0.0
+
+# أدوات إضافية مفيدة
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# معالجة البيانات
+python-dateutil>=2.8.2
