@@ -1,5 +1,5 @@
 # app.py
-# 🚀 تحديث الكوكيز: تفعيل التحميل من انستغرام باستخدام حسابك
+# 🚀 الإصدار النهائي 2.0: إصلاح خطأ Markdown + دعم ذكي لصور انستغرام
 
 import logging
 import os
@@ -74,23 +74,18 @@ def get_base_ydl_opts(url: str) -> dict:
         'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
         'ffmpeg_location': '/usr/bin/ffmpeg',
     }
-    
-    # --- ✨ المنطق الجديد والمُحسَّن مع الكوكيز ✨ ---
     if 'instagram.com' in url:
-        # إذا كان الرابط من انستغرام
+        opts['proxy'] = PRIMARY_PROXY
         if os.path.exists("cookies.txt"):
             opts['cookiefile'] = "cookies.txt"
-            logging.info("Instagram URL detected. Applying cookies file.")
+            logging.info("Instagram URL detected. Applying proxy and cookies file.")
         else:
-            logging.info("Instagram URL detected, but no cookies.txt found. Using direct connection.")
+            logging.info("Instagram URL detected. Applying proxy, but no cookies.txt found.")
     elif 'facebook.com' in url:
-        # فيسبوك يعمل بشكل أفضل بدون بروكسي أو كوكيز حاليًا
         logging.info("Facebook URL detected. Using direct connection.")
     else:
-        # باقي المواقع تستخدم البروكسي
         opts['proxy'] = PRIMARY_PROXY
         logging.info(f"Generic URL detected. Applying proxy.")
-        
     return opts
 
 async def run_ydl_analysis(url: str) -> dict:
@@ -102,7 +97,7 @@ async def run_ydl_analysis(url: str) -> dict:
             return await asyncio.to_thread(ydl.extract_info, url, download=False)
     except Exception as e:
         logging.error(f"YDL Analysis failed for {url}: {e}")
-        raise AnalysisError(f"فشل تحليل الرابط. الخطأ: {str(e)}")
+        raise AnalysisError(str(e))
 
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
@@ -122,10 +117,10 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
             return original_filename
     except Exception as e:
         logging.error(f"Download failed for {url}: {e}")
-        raise DownloadError(f"فشل التحميل. الخطأ: {str(e)}")
+        raise DownloadError(str(e))
 
 # ==============================================================================
-# 4. UI BUILDERS (No changes)
+# 4. UI BUILDERS
 # ==============================================================================
 
 def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
@@ -152,15 +147,23 @@ def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     return caption, InlineKeyboardMarkup(keyboard)
 
 def build_instagram_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
+    # --- ✨ منطق انستغرام الجديد والأكثر ذكاءً ✨ ---
     uploader = info.get('uploader', 'غير معروف')
     caption = f"📸 **انستغرام**\n\n👤 **الحساب:** {escape_markdown(uploader)}"
+    keyboard_buttons = []
+    
     if 'entries' in info:
-        caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من الصور/الفيديوهات."
-        keyboard = [[InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl:ig_gallery:all:{msg_id}")]]
+        # هذا معرض (Carousel) أو ستوري متعدد الأجزاء
+        caption += f"\n\nهذا المنشور يحتوي على **{len(info['entries'])}** من العناصر."
+        keyboard_buttons.append(InlineKeyboardButton("📥 تحميل الكل (ZIP)", callback_data=f"dl:ig_gallery:all:{msg_id}"))
+    elif info.get('duration'):
+        # هذا فيديو واحد (Reel أو فيديو عادي)
+        keyboard_buttons.append(InlineKeyboardButton("🎬 تحميل الفيديو", callback_data=f"dl:v:best:{msg_id}"))
     else:
-        media_type = "فيديو" if info.get('duration') else "صورة"
-        keyboard = [[InlineKeyboardButton(f"🎬 تحميل ال{media_type}", callback_data=f"dl:v:best:{msg_id}")]]
-    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")])
+        # إذا لم يكن معرضًا ولا فيديو، فهو صورة واحدة
+        keyboard_buttons.append(InlineKeyboardButton("🖼️ تحميل الصورة", callback_data=f"dl:v:best:{msg_id}"))
+        
+    keyboard = [keyboard_buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
     return caption, InlineKeyboardMarkup(keyboard)
 
 def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
@@ -177,14 +180,14 @@ def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     return caption, InlineKeyboardMarkup(keyboard)
 
 # ==============================================================================
-# 5. TELEGRAM HANDLERS (No changes)
+# 5. TELEGRAM HANDLERS
 # ==============================================================================
 
 async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
     if not ADMIN_ID: return
     report = (
         f"🚨 {escape_markdown(error_type)} 🚨\n\n"
-        f"**المستخدم:** `{user_id}`\n"
+        f"**المستخدم:** `{escape_markdown(str(user_id))}`\n"
         f"**الرابط:** `{escape_markdown(url)}`\n"
         f"**الخطأ:** `{escape_markdown(error_message)}`"
     )
@@ -220,6 +223,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (AnalysisError, Exception) as e:
         await report_error(context, update.effective_user.id, url, str(e), "خطأ تحليل")
         try:
+            # --- ✨ الإصلاح الحاسم هنا: تهريب رسالة الخطأ للمستخدم ---
             await msg.edit_text(escape_markdown(ANALYSIS_FAILED_MESSAGE), parse_mode=ParseMode.MARKDOWN_V2)
         except BadRequest:
             await msg.edit_text(escape_markdown(GENERIC_ERROR_MESSAGE), parse_mode=ParseMode.MARKDOWN_V2)
@@ -294,7 +298,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg_id in context.user_data: del context.user_data[msg_id]
 
 # ==============================================================================
-# 6. APPLICATION SETUP & ENTRY POINT (No changes)
+# 6. APPLICATION SETUP & ENTRY POINT
 # ==============================================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(context.error, BadRequest) and "Message is not modified" in str(context.error):
