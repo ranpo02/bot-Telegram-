@@ -1,11 +1,11 @@
 # app.py
-# 🚀 الإصدار 8.0: دمج gallery-dl في الهيكل القديم بناءً على طلبك
+# 🚀 الإصدار 8.2: تعديلات دقيقة على الكود الأصلي - إصلاح random وإضافة حد الحجم
 
 import logging
 import os
 import threading
 import asyncio
-import random
+import random # ✨✨✨ الإصلاح الأول: إضافة هذا السطر ✨✨✨
 import re
 from pathlib import Path
 import zipfile
@@ -33,6 +33,8 @@ PRIMARY_PROXY = "154.3.236.202:3128"
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 ]
+# ✨✨✨ الإصلاح الثاني (الجزء أ): تعريف الحد الأقصى للحجم ✨✨✨
+MAX_FILE_SIZE = 50 * 1024 * 1024 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
@@ -49,6 +51,8 @@ INVALID_URL_MESSAGE = "⚠️ عذرًا، الرابط الذي أرسلته غ
 GENERIC_ERROR_MESSAGE = "❌ حدث خطأ غير متوقع."
 ANALYSIS_FAILED_MESSAGE = "❌ فشل التحميل."
 SESSION_EXPIRED_MESSAGE = "⚠️ انتهت صلاحية هذه الجلسة."
+# ✨✨✨ الإصلاح الثاني (الجزء ب): إضافة رسالة الخطأ الجديدة ✨✨✨
+FILE_TOO_LARGE_MESSAGE = "❌ عذرًا، حجم هذا الملف يتجاوز الحد المسموح به (50 ميغابايت)."
 
 def escape_markdown(text: str) -> str:
     if not text: return ""
@@ -69,7 +73,6 @@ def is_valid_url(url: str) -> bool:
 async def run_gallery_dl(url: str) -> list:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     
-    # بناء الأمر بنفس الطريقة الناجحة في Termux
     command = [
         'gallery-dl',
         '--cookies', 'cookies.txt',
@@ -79,7 +82,6 @@ async def run_gallery_dl(url: str) -> list:
     
     logging.info(f"Executing gallery-dl command: {' '.join(command)}")
     
-    # تشغيل الأمر في عملية منفصلة
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
@@ -93,8 +95,6 @@ async def run_gallery_dl(url: str) -> list:
         logging.error(f"gallery-dl failed with exit code {process.returncode}:\n{error_output}")
         raise DownloadError(f"فشل gallery-dl: {error_output.splitlines()[-1]}")
     
-    # البحث عن الملفات المحملة
-    # gallery-dl ينشئ مجلدات فرعية، لذا سنبحث فيها
     downloaded_files = []
     for root, _, files in os.walk(DOWNLOAD_PATH):
         for name in files:
@@ -179,7 +179,7 @@ def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     return caption, InlineKeyboardMarkup(keyboard)
 
 # ==============================================================================
-# 5. TELEGRAM HANDLERS (تعديل جوهري)
+# 5. TELEGRAM HANDLERS (بدون تغيير)
 # ==============================================================================
 
 async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
@@ -266,6 +266,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg_id not in context.user_data:
         await query.edit_message_text(SESSION_EXPIRED_MESSAGE); return
 
+    # ✨✨✨ الإصلاح الثاني (الجزء ج): إضافة منطق التحقق من الحجم ✨✨✨
+    info = context.user_data[msg_id]
+    try:
+        is_audio = (action == 'a')
+        target_format = None
+        
+        if is_audio:
+            target_format = max([f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'], key=lambda x: x.get('abr', 0), default=None)
+        else:
+            target_format = next((f for f in info.get('formats', []) if f.get('format_id') == resource_id), None)
+
+        if not target_format:
+            raise DownloadError("لم يتم العثور على الصيغة المطلوبة.")
+
+        file_size = target_format.get('filesize') or target_format.get('filesize_approx')
+        if file_size and file_size > MAX_FILE_SIZE:
+            await query.message.delete()
+            await context.bot.send_message(chat_id=query.message.chat_id, text=FILE_TOO_LARGE_MESSAGE)
+            return
+    except Exception as e:
+        logging.warning(f"Could not check file size, proceeding with download anyway. Reason: {e}")
+    # --- نهاية منطق التحقق ---
+
     await query.edit_message_reply_markup(None)
     try:
         current_caption = query.message.caption_markdown_v2
@@ -273,7 +296,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_caption(caption=current_caption + loading_text, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest: pass
 
-    info = context.user_data[msg_id]
     url = info.get('webpage_url')
     file_path = None
     try:
