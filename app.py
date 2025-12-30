@@ -1,5 +1,5 @@
 # app.py
-# ✨ الإصدار النهائي الحقيقي - مع إصلاح Markdown وكل الميزات ✨
+# 🚀 تحديث الكوكيز: تفعيل التحميل من انستغرام باستخدام حسابك
 
 import logging
 import os
@@ -74,12 +74,23 @@ def get_base_ydl_opts(url: str) -> dict:
         'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
         'ffmpeg_location': '/usr/bin/ffmpeg',
     }
-    is_meta_platform = 'instagram.com' in url or 'facebook.com' in url
-    if not is_meta_platform:
+    
+    # --- ✨ المنطق الجديد والمُحسَّن مع الكوكيز ✨ ---
+    if 'instagram.com' in url:
+        # إذا كان الرابط من انستغرام
+        if os.path.exists("cookies.txt"):
+            opts['cookiefile'] = "cookies.txt"
+            logging.info("Instagram URL detected. Applying cookies file.")
+        else:
+            logging.info("Instagram URL detected, but no cookies.txt found. Using direct connection.")
+    elif 'facebook.com' in url:
+        # فيسبوك يعمل بشكل أفضل بدون بروكسي أو كوكيز حاليًا
+        logging.info("Facebook URL detected. Using direct connection.")
+    else:
+        # باقي المواقع تستخدم البروكسي
         opts['proxy'] = PRIMARY_PROXY
         logging.info(f"Generic URL detected. Applying proxy.")
-    else:
-        logging.info(f"Meta platform URL detected. Using direct connection.")
+        
     return opts
 
 async def run_ydl_analysis(url: str) -> dict:
@@ -114,7 +125,7 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
         raise DownloadError(f"فشل التحميل. الخطأ: {str(e)}")
 
 # ==============================================================================
-# 4. UI BUILDERS
+# 4. UI BUILDERS (No changes)
 # ==============================================================================
 
 def build_youtube_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
@@ -166,7 +177,7 @@ def build_generic_ui(info: dict, msg_id: int) -> (str, InlineKeyboardMarkup):
     return caption, InlineKeyboardMarkup(keyboard)
 
 # ==============================================================================
-# 5. TELEGRAM HANDLERS
+# 5. TELEGRAM HANDLERS (No changes)
 # ==============================================================================
 
 async def report_error(context: ContextTypes.DEFAULT_TYPE, user_id: int, url: str, error_message: str, error_type: str):
@@ -237,7 +248,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await query.edit_message_reply_markup(reply_markup=None)
-        # --- الإصلاح الحاسم هنا ---
         current_caption = query.message.caption_markdown_v2
         loading_text = escape_markdown("\n\n⏳ جارٍ التحميل، قد يستغرق الأمر بعض الوقت...")
         await context.bot.edit_message_caption(chat_id=query.message.chat_id, message_id=query.message.message_id, caption=current_caption + loading_text, parse_mode=ParseMode.MARKDOWN_V2)
@@ -259,7 +269,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             is_audio = (media_type == 'a')
             file_path = await run_ydl_download(url, format_id, is_audio)
-            # --- والإصلاح الحاسم هنا أيضًا ---
             base_caption = query.message.caption_markdown_v2.split('\n\n⏳')[0]
             uploading_text = escape_markdown(f"\n\n{UPLOADING_MESSAGE}")
             await context.bot.edit_message_caption(chat_id=query.message.chat_id, message_id=query.message.message_id, caption=base_caption + uploading_text, parse_mode=ParseMode.MARKDOWN_V2)
@@ -285,7 +294,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg_id in context.user_data: del context.user_data[msg_id]
 
 # ==============================================================================
-# 6. APPLICATION SETUP & ENTRY POINT
+# 6. APPLICATION SETUP & ENTRY POINT (No changes)
 # ==============================================================================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(context.error, BadRequest) and "Message is not modified" in str(context.error):
@@ -314,4 +323,3 @@ if __name__ == '__main__':
         logging.fatal("FATAL: BOT_TOKEN not set.")
     else:
         main()
-
