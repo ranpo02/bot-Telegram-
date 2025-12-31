@@ -1,4 +1,4 @@
-# app.py - الإصدار النهائي 16.0 - (مُعدّل لحل مشاكل التزامن)
+# app.py - الإصدار النهائي 16.0 - (مُعدّل لحل مشاكل التزامن والأخطاء الأخيرة)
 import logging
 import os
 import threading
@@ -57,8 +57,7 @@ for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
 # ==============================================================================
 active_downloads = defaultdict(int)  # عدد التحميلات النشطة لكل مستخدم
 download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)  # حد التحميلات الكلي
-# ⭐ تعديل: إضافة أقفال لكل مستخدم لمنع حالة السباق
-user_locks = defaultdict(asyncio.Lock)
+user_locks = defaultdict(asyncio.Lock) # قفل لكل مستخدم لمنع حالة السباق
 
 # ==============================================================================
 # 3. قاعدة البيانات (مع حفظ البيانات)
@@ -120,14 +119,12 @@ def log_download(user_id: int, username: str, url: str, platform: str, success: 
         conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
         
-        # تسجيل التحميل
         c.execute('''INSERT INTO downloads (user_id, username, url, platform, timestamp, 
                      success, error_message, file_size, quality, download_duration)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                   (user_id, username, url, platform, datetime.now(), success, 
                    error_msg, file_size, quality, duration))
         
-        # تحديث إحصائيات المستخدم
         c.execute('''INSERT INTO user_stats (user_id, username, total_downloads, 
                      successful_downloads, failed_downloads, total_data_downloaded, first_use, last_use)
                      VALUES (?, ?, 1, ?, ?, ?, ?, ?)
@@ -141,7 +138,6 @@ def log_download(user_id: int, username: str, url: str, platform: str, success: 
                    file_size or 0, datetime.now(), datetime.now(),
                    1 if success else 0, 1 if not success else 0, file_size or 0, datetime.now()))
         
-        # تحديث مقاييس اليوم
         today = datetime.now().date()
         c.execute('''INSERT INTO bot_metrics (date, total_requests, successful_requests, 
                      failed_requests, total_data_transferred, unique_users)
@@ -179,7 +175,6 @@ def get_stats():
         c.execute('SELECT AVG(download_duration) FROM downloads WHERE success=1 AND download_duration IS NOT NULL')
         avg_duration = c.fetchone()[0]
         
-        # أسرع 3 مستخدمين
         c.execute('''SELECT username, total_downloads FROM user_stats 
                      ORDER BY total_downloads DESC LIMIT 3''')
         top_users = c.fetchall()
@@ -187,12 +182,12 @@ def get_stats():
         conn.close()
         
         return {
-            'users': total_users,
+            'users': total_users or 0,
             'total': stats[0] or 0,
             'success': stats[1] or 0,
             'failed': stats[2] or 0,
             'total_data': stats[3] or 0,
-            'today': today,
+            'today': today or 0,
             'top_platforms': top_platforms,
             'avg_duration': avg_duration,
             'top_users': top_users
@@ -286,9 +281,9 @@ def cleanup_old_files():
 
 async def periodic_cleanup():
     while True:
+        await asyncio.sleep(CLEANUP_INTERVAL)
         cleanup_old_files()
         await cleanup_old_cache()
-        await asyncio.sleep(CLEANUP_INTERVAL)
 
 def cleanup_on_exit():
     """تنظيف الملفات المؤقتة فقط - لا تحذف قاعدة البيانات"""
@@ -310,59 +305,46 @@ def is_valid_url(url: str) -> bool:
     return bool(re.match(r'https?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', url))
 
 def detect_platform(url: str) -> str:
-    if 'youtube.com' in url or 'youtu.be' in url:
-        return 'youtube'
-    elif 'instagram.com' in url:
-        return 'instagram'
-    elif 'facebook.com' in url or 'fb.watch' in url:
-        return 'facebook'
-    elif 'twitter.com' in url or 'x.com' in url:
-        return 'twitter'
-    elif 'tiktok.com' in url:
-        return 'tiktok'
+    if 'youtube.com' in url or 'youtu.be' in url: return 'youtube'
+    if 'instagram.com' in url: return 'instagram'
+    if 'facebook.com' in url or 'fb.watch' in url: return 'facebook'
+    if 'twitter.com' in url or 'x.com' in url: return 'twitter'
+    if 'tiktok.com' in url: return 'tiktok'
     return 'generic'
 
 def format_size(size_bytes: int) -> str:
     if not isinstance(size_bytes, (int, float)) or size_bytes < 0: return "0 B"
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024: return f"{size_bytes} B"
+    if size_bytes < 1024**2: return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 def format_duration(seconds: float) -> str:
     if not isinstance(seconds, (int, float)) or seconds < 0: return "غير معروف"
-    if seconds < 60:
-        return f"{seconds:.1f}ث"
+    if seconds < 60: return f"{seconds:.1f}ث"
     minutes = int(seconds / 60)
     secs = int(seconds % 60)
     return f"{minutes}د {secs}ث"
 
 def escape_markdown(text: str) -> str:
-    if not text:
-        return ""
-    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', str(text))
+    if not text: return ""
+    # قائمة الأحرف المحجوزة في MarkdownV2
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
 
 # ==============================================================================
 # 8. Exceptions
 # ==============================================================================
-class DownloadError(Exception):
-    pass
-
-class AnalysisError(Exception):
-    pass
+class DownloadError(Exception): pass
+class AnalysisError(Exception): pass
 
 # ==============================================================================
 # 9. التحميل من Instagram
 # ==============================================================================
 async def run_gallery_dl(url: str) -> list:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
-    
     command = ['gallery-dl', '--cookies', 'cookies.txt', '--directory', str(DOWNLOAD_PATH), url]
     
-    # ⭐ تعديل: تم جعل العملية غير حاجزة بشكل صحيح
     process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=DOWNLOAD_TIMEOUT)
     except asyncio.TimeoutError:
@@ -380,207 +362,118 @@ async def run_gallery_dl(url: str) -> list:
         for name in names:
             fp = os.path.join(root, name)
             try:
-                size = os.path.getsize(fp)
-                if size <= MAX_FILE_SIZE:
-                    files.append(fp)
+                if os.path.getsize(fp) <= MAX_FILE_SIZE: files.append(fp)
                 else:
-                    logging.warning(f"ملف كبير جداً: {name} ({format_size(size)})")
+                    logging.warning(f"ملف كبير جداً: {name} ({format_size(os.path.getsize(fp))})")
                     os.remove(fp)
-            except OSError:
-                continue
+            except OSError: continue
     
-    if not files:
-        raise DownloadError("لم يتم العثور على ملفات مناسبة (قد تكون كبيرة جداً)")
-    
+    if not files: raise DownloadError("لم يتم العثور على ملفات مناسبة (قد تكون كبيرة جداً)")
     return files
 
 # ==============================================================================
 # 10. التحميل من YouTube وغيرها
 # ==============================================================================
 def get_ydl_opts(url: str) -> dict:
-    opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
-        'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
-        'ffmpeg_location': '/usr/bin/ffmpeg',
-        'socket_timeout': 300
-    }
-    
-    if 'facebook.com' not in url and 'fb.watch' not in url:
-        opts['proxy'] = PRIMARY_PROXY
-    
+    opts = {'quiet': True, 'no_warnings': True, 'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
+            'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'), 'ffmpeg_location': '/usr/bin/ffmpeg', 'socket_timeout': 300}
+    if 'facebook.com' not in url and 'fb.watch' not in url: opts['proxy'] = PRIMARY_PROXY
     return opts
 
 async def run_ydl_analysis(url: str) -> dict:
-    cached = await get_cached_info(url)
-    if cached:
-        return cached
-    
+    if cached := await get_cached_info(url): return cached
     opts = get_ydl_opts(url)
     opts['skip_download'] = True
-    
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            # ⭐ تعديل: تشغيل العملية الحاجزة في خيط منفصل
             info = await asyncio.to_thread(ydl.extract_info, url, download=False)
-            if not info:
-                raise AnalysisError("فشل استخراج المعلومات")
-            
-            await set_cached_info(url, info)
-            return info
-    except yt_dlp.utils.DownloadError as e:
-        raise AnalysisError(f"خطأ: {str(e)}")
-    except Exception as e:
-        raise AnalysisError(f"خطأ غير متوقع: {str(e)}")
+        if not info: raise AnalysisError("فشل استخراج المعلومات")
+        await set_cached_info(url, info)
+        return info
+    except yt_dlp.utils.DownloadError as e: raise AnalysisError(f"خطأ: {str(e)}")
+    except Exception as e: raise AnalysisError(f"خطأ غير متوقع: {str(e)}")
 
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     opts = get_ydl_opts(url)
-    
     if is_audio:
         opts['format'] = 'bestaudio/best'
         opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}]
-    else:
-        opts['format'] = format_id
-    
+    else: opts['format'] = format_id
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            # ⭐ تعديل: تشغيل العملية الحاجزة في خيط منفصل
-            info = await asyncio.wait_for(
-                asyncio.to_thread(ydl.extract_info, url, download=True),
-                timeout=DOWNLOAD_TIMEOUT
-            )
+            info = await asyncio.wait_for(asyncio.to_thread(ydl.extract_info, url, download=True), timeout=DOWNLOAD_TIMEOUT)
             filename = ydl.prepare_filename(info)
-            
-            if is_audio:
-                return str(Path(filename).with_suffix('.mp3'))
-            return filename
-    except asyncio.TimeoutError:
-        raise DownloadError("انتهت مهلة التحميل (أكثر من 10 دقائق)")
-    except yt_dlp.utils.DownloadError as e:
-        raise DownloadError(f"خطأ: {str(e)}")
-    except Exception as e:
-        raise DownloadError(f"خطأ غير متوقع: {str(e)}")
+        return str(Path(filename).with_suffix('.mp3')) if is_audio else filename
+    except asyncio.TimeoutError: raise DownloadError("انتهت مهلة التحميل (أكثر من 10 دقائق)")
+    except yt_dlp.utils.DownloadError as e: raise DownloadError(f"خطأ: {str(e)}")
+    except Exception as e: raise DownloadError(f"خطأ غير متوقع: {str(e)}")
 
 # ==============================================================================
 # 11. واجهات المستخدم المحسّنة (مع عرض الأحجام)
 # ==============================================================================
 def get_total_size_estimate(info: dict) -> str:
-    """حساب الحجم الإجمالي التقريبي"""
     formats = info.get('formats', [])
-    if not formats:
-        return "غير معروف"
-    
-    # أخذ أفضل صيغة فيديو
+    if not formats: return "غير معروف"
     video_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
     if video_formats:
         best = max(video_formats, key=lambda x: x.get('height', 0), default=None)
-        if best:
-            size = best.get('filesize') or best.get('filesize_approx', 0)
-            if size:
-                return format_size(size)
-    
+        if best and (size := best.get('filesize') or best.get('filesize_approx')): return format_size(size)
     return "غير معروف"
 
 def build_youtube_ui(info: dict, msg_id: int) -> tuple:
-    title = info.get('title', 'غير متوفر')
-    uploader = info.get('uploader', 'غير متوفر')
-    duration = info.get('duration', 0)
-    views = info.get('view_count', 0)
-    
+    title, uploader = info.get('title', 'غير متوفر'), info.get('uploader', 'غير متوفر')
+    duration, views = info.get('duration'), info.get('view_count')
     dur_str = f"{int(duration // 60)}:{int(duration % 60):02d}" if duration else "غير معروف"
     views_str = f"{views:,}" if views else "غير معروف"
-    size_est = get_total_size_estimate(info)
+    caption = (f"🎬 **يوتيوب**\n\n📝 {escape_markdown(title[:100])}\n👤 {escape_markdown(uploader)}\n"
+               f"⏱ المدة: {dur_str}\n👁 المشاهدات: {escape_markdown(views_str)}\n"
+               f"📦 الحجم التقريبي: {escape_markdown(get_total_size_estimate(info))}")
     
-    caption = (
-        f"🎬 **يوتيوب**\n\n"
-        f"📝 {escape_markdown(title[:100])}\n"
-        f"👤 {escape_markdown(uploader)}\n"
-        f"⏱ المدة: {dur_str}\n"
-        f"👁 المشاهدات: {escape_markdown(views_str)}\n"
-        f"📦 الحجم التقريبي: {escape_markdown(size_est)}"
-    )
-    
-    formats = [f for f in info.get('formats', []) 
-               if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height', 0) <= 720]
-    
+    formats = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height', 0) <= 720]
     for f in formats:
         size = f.get('filesize') or f.get('filesize_approx', 0)
         f['_size_str'] = format_size(size) if size else ""
         f['_too_large'] = size > MAX_FILE_SIZE if size else False
     
     best = max(formats, key=lambda x: x.get('height', 0), default=None)
-    
     buttons = []
     if best and not best.get('_too_large'):
-        btn_text = f"🎬 {best.get('height')}p"
-        if best.get('_size_str'):
-            btn_text += f" ({best.get('_size_str')})"
+        btn_text = f"🎬 {best.get('height')}p" + (f" ({best['_size_str']})" if best['_size_str'] else "")
         buttons.append(InlineKeyboardButton(btn_text, callback_data=f"yt:v:{best['format_id']}:{msg_id}"))
-    
     buttons.append(InlineKeyboardButton("🎵 MP3", callback_data=f"yt:a:best:{msg_id}"))
     
     keyboard = [buttons]
-    
-    available = [f for f in formats if not f.get('_too_large')]
-    if len(available) > 1:
+    if len([f for f in formats if not f.get('_too_large')]) > 1:
         keyboard.append([InlineKeyboardButton("🎞️ جودات أخرى", callback_data=f"qualities:v:na:{msg_id}")])
-    
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")])
-    
     return caption, InlineKeyboardMarkup(keyboard)
 
 def build_generic_ui(info: dict, msg_id: int) -> tuple:
-    site = info.get('extractor_key', 'Website').capitalize()
-    title = info.get('title', 'غير متوفر')
-    size_est = get_total_size_estimate(info)
-    
-    caption = (
-        f"🌐 **{escape_markdown(site)}**\n\n"
-        f"📝 {escape_markdown(title[:100])}\n"
-        f"📦 الحجم التقريبي: {escape_markdown(size_est)}"
-    )
-    
-    buttons = [
-        InlineKeyboardButton("🎬 فيديو", callback_data=f"yt:v:best:{msg_id}"),
-        InlineKeyboardButton("🎵 صوت", callback_data=f"yt:a:best:{msg_id}")
-    ]
-    
-    keyboard = [buttons, [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
-    
+    caption = (f"🌐 **{escape_markdown(info.get('extractor_key', 'Website').capitalize())}**\n\n"
+               f"📝 {escape_markdown(info.get('title', 'غير متوفر')[:100])}\n"
+               f"📦 الحجم التقريبي: {escape_markdown(get_total_size_estimate(info))}")
+    keyboard = [[InlineKeyboardButton("🎬 فيديو", callback_data=f"yt:v:best:{msg_id}"),
+                 InlineKeyboardButton("🎵 صوت", callback_data=f"yt:a:best:{msg_id}")],
+                [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]]
     return caption, InlineKeyboardMarkup(keyboard)
 
 def build_qualities_ui(info: dict, msg_id: int) -> InlineKeyboardMarkup:
-    formats = [f for f in info.get('formats', []) 
-               if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
-    
-    formats.sort(key=lambda x: x.get('height', 0), reverse=True)
-    
-    buttons = []
-    seen = set()
-    
+    formats = sorted([f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none'],
+                     key=lambda x: x.get('height', 0), reverse=True)
+    buttons, seen = [], set()
     for f in formats:
-        h = f.get('height', 0)
+        h = f.get('height')
         if h and h not in seen and h <= 1080:
             seen.add(h)
             size = f.get('filesize') or f.get('filesize_approx', 0)
             size_str = f" ({format_size(size)})" if size else ""
-            
             if size and size > MAX_FILE_SIZE:
-                buttons.append([InlineKeyboardButton(
-                    f"❌ {h}p{size_str} (كبير)",
-                    callback_data=f"ignore:na:na:{msg_id}"
-                )])
+                buttons.append([InlineKeyboardButton(f"❌ {h}p{size_str} (كبير)", callback_data=f"ignore:na:na:{msg_id}")])
             else:
-                buttons.append([InlineKeyboardButton(
-                    f"📹 {h}p{size_str}",
-                    callback_data=f"yt:v:{f['format_id']}:{msg_id}"
-                )])
-    
-    buttons.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"back:na:na:{msg_id}")])
-    buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")])
-    
+                buttons.append([InlineKeyboardButton(f"📹 {h}p{size_str}", callback_data=f"yt:v:{f['format_id']}:{msg_id}")])
+    buttons.extend([[InlineKeyboardButton("🔙 رجوع", callback_data=f"back:na:na:{msg_id}")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel:na:na:{msg_id}")]])
     return InlineKeyboardMarkup(buttons)
 # ==============================================================================
 # 12. معالجات الأوامر
@@ -652,6 +545,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # حساب معدل النجاح
     success_rate = (stats['success'] / stats['total'] * 100) if stats['total'] > 0 else 0
     
+    # ⭐ تعديل: تم تهريب المتغيرات التي قد تحتوي على أحرف خاصة
+    success_rate_str = f"{success_rate:.1f}%"
+    
     # متوسط وقت التحميل
     avg_time = format_duration(stats['avg_duration']) if stats['avg_duration'] else "غير متوفر"
     
@@ -667,7 +563,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• ✅ ناجحة: {stats['success']}\n"
         f"• ❌ فاشلة: {stats['failed']}\n"
         f"• 📅 اليوم: {stats['today']}\n"
-        f"• 📈 معدل النجاح: {success_rate:.1f}%\n\n"
+        f"• 📈 معدل النجاح: {escape_markdown(success_rate_str)}\n\n"
         f"⏱ **الأداء:**\n"
         f"• متوسط وقت التحميل: {escape_markdown(avg_time)}\n"
         f"• إجمالي البيانات: {escape_markdown(total_data_str)}\n\n"
@@ -678,7 +574,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
 # ==============================================================================
-# 13. معالج الروابط (مُحصّن ضد حالة السباق)
+# 13. معالج الروابط (متزامن ومحسّن)
 # ==============================================================================
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -686,63 +582,65 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ⭐ تعديل: التحقق من القفل لمنع المستخدم من بدء عملية جديدة
     if user_locks[user.id].locked():
-        await update.message.reply_text("⏳ لديك عملية أخرى قيد التنفيذ. يرجى الانتظار.", quote=True)
+        # ⭐ تعديل: إزالة quote=True
+        await update.message.reply_text("⏳ لديك عملية أخرى قيد التنفيذ. يرجى الانتظار.")
         return
-
+    
     if not is_valid_url(url):
-        await update.message.reply_text("⚠️ رابط غير صالح", quote=True)
+        await update.message.reply_text("⚠️ رابط غير صالح")
         return
     
     if not await check_rate_limit(user.id):
-        await update.message.reply_text("⏱ تجاوزت الحد (5 طلبات/دقيقة). انتظر قليلاً", quote=True)
+        await update.message.reply_text("⏱ تجاوزت الحد (5 طلبات/دقيقة). انتظر قليلاً")
         return
-
+    
     # ⭐ تعديل: الحصول على القفل وبدء العملية
     async with user_locks[user.id]:
         if active_downloads[user.id] >= 3:
-            await update.message.reply_text("⚠️ لديك 3 تحميلات نشطة بالفعل. انتظر حتى تنتهي", quote=True)
+            await update.message.reply_text("⚠️ لديك 3 تحميلات نشطة بالفعل. انتظر حتى تنتهي")
             return
         
         active_downloads[user.id] += 1
         start_time = time.time()
         
         async with download_semaphore:
-            msg = await update.message.reply_text("⏳ جارٍ التحليل...", quote=True)
+            # ⭐ تعديل: إزالة quote=True
+            msg = await update.message.reply_text("⏳ جارٍ التحليل...")
             platform = detect_platform(url)
-            files_to_clean = []
+            files = []
             
             try:
                 if platform == 'instagram':
-                    files_to_clean = await run_gallery_dl(url)
+                    files = await run_gallery_dl(url)
                     await msg.edit_text("⚡️ جارٍ الرفع...")
                     
-                    size = 0
-                    quality = 'N/A'
-
-                    if len(files_to_clean) == 1:
-                        fp = Path(files_to_clean[0])
+                    if len(files) == 1:
+                        fp = Path(files[0])
                         size = fp.stat().st_size if fp.exists() else 0
                         
-                        with open(fp, 'rb') as f:
+                        with open(fp, 'rb') as f_obj:
                             if fp.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
-                                await context.bot.send_photo(update.effective_chat.id, f, caption="✅ تم")
+                                await context.bot.send_photo(update.effective_chat.id, f_obj, caption="✅ تم")
                             else:
-                                await context.bot.send_video(update.effective_chat.id, f, caption="✅ تم", supports_streaming=True)
+                                await context.bot.send_video(update.effective_chat.id, f_obj, caption="✅ تم", supports_streaming=True)
+                        
+                        quality = 'N/A'
                     else:
                         zip_path = DOWNLOAD_PATH / f"ig_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
                         with zipfile.ZipFile(zip_path, 'w') as z:
-                            for f_path in files_to_clean:
-                                z.write(f_path, Path(f_path).name)
+                            for f in files:
+                                z.write(f, Path(f).name)
                         
                         size = zip_path.stat().st_size
-                        with open(zip_path, 'rb') as f:
-                            await context.bot.send_document(update.effective_chat.id, f, caption=f"✅ {len(files_to_clean)} ملف")
-                        files_to_clean.append(str(zip_path))
+                        with open(zip_path, 'rb') as f_obj:
+                            await context.bot.send_document(update.effective_chat.id, f_obj, caption=f"✅ {len(files)} ملف")
+                        files.append(str(zip_path))
                         quality = 'ZIP'
                     
                     await msg.delete()
                     duration = time.time() - start_time
-                    log_download(user.id, user.username, url, platform, True, file_size=size, quality=quality, duration=duration)
+                    log_download(user.id, user.username, url, platform, True, 
+                               file_size=size, quality=quality, duration=duration)
                 
                 else:
                     info = await run_ydl_analysis(url)
@@ -774,14 +672,14 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             finally:
                 active_downloads[user.id] -= 1
-                for f in files_to_clean:
+                for f in files:
                     try:
                         if os.path.exists(f): os.remove(f)
                     except Exception as e:
                         logging.warning(f"فشل حذف {f}: {e}")
 
 # ==============================================================================
-# 14. معالج الأزرار (مُحصّن ضد حالة السباق)
+# 14. معالج الأزرار
 # ==============================================================================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -811,7 +709,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if msg_id not in context.user_data:
-        try: await query.edit_message_text("⚠️ انتهت الجلسة. أرسل الرابط مرة أخرى.")
+        try: await query.edit_message_text("⚠️ انتهت الجلسة")
         except BadRequest: pass
         return
     
@@ -861,13 +759,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 title = info.get('title', 'تحميل')
                 quality = 'MP3'
-                with open(file_path, 'rb') as f:
+                with open(file_path, 'rb') as f_obj:
                     if is_audio:
-                        await context.bot.send_audio(query.message.chat_id, f, title=title[:64], caption="✅ تم التحميل")
+                        await context.bot.send_audio(query.message.chat_id, f_obj, title=title[:64], caption="✅ تم التحميل")
                     else:
                         fmt = next((f for f in info.get('formats', []) if f.get('format_id') == resource_id), None)
                         quality = f"{fmt.get('height')}p" if fmt else "فيديو"
-                        await context.bot.send_video(query.message.chat_id, f, caption=f"✅ {escape_markdown(title[:200])}", parse_mode=ParseMode.MARKDOWN_V2, supports_streaming=True)
+                        await context.bot.send_video(query.message.chat_id, f_obj, caption=f"✅ {escape_markdown(title[:200])}", parse_mode=ParseMode.MARKDOWN_V2, supports_streaming=True)
                 
                 await query.message.delete()
                 log_download(user.id, user.username, url, platform, True, file_size=actual_size, quality=quality, duration=time.time() - start_time)
