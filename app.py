@@ -718,7 +718,454 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(escape_markdown(text), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != ADMIN, file_size: int = None, quality: str = None):
+    if str(update.effective_user.id) != ADMIN_ID:
+        await update.message.reply_text("⛔️ هذا الأمر للأدمن فقط")
+        return
+    
+    stats = get_stats()
+    if not stats:
+        await update.message.reply_text("❌ فشل جلب الإحصائيات")
+        return
+    
+    # تنسيق المنصات
+    platforms_text = "\n".join([f"• {escape_markdown(p[0])}: {p[1]}" for p in stats['top_platforms']])
+    
+    # تنسيق أفضل المستخدمين
+    users_text = "\n".join([f"• {escape_markdown(u[0] or 'مجهول')}: {u[1]}" for u in stats['top_users']])
+    
+    # حساب معدل النجاح
+    success_rate = (stats['success'] / stats['total'] * 100) if stats['total'] > 0 else 0
+    
+    # متوسط وقت التحميل
+    avg_time = format_duration(stats['avg_duration']) if stats['avg_duration'] else "غير متوفر"
+    
+    # إجمالي البيانات
+    total_data_str = format_size(stats['total_data'])
+    
+    text = (
+        f"📊 **إحصائيات البوت الشاملة**\n\n"
+        f"👥 **المستخدمون:**\n"
+        f"• الإجمالي: {stats['users']}\n\n"
+        f"📥 **التحميلات:**\n"
+        f"• الإجمالي: {stats['total']}\n"
+        f"• ✅ ناجحة: {stats['success']}\n"
+        f"• ❌ فاشلة: {stats['failed']}\n"
+        f"• 📅 اليوم: {stats['today']}\n"
+        f"• 📈 معدل النجاح: {success_rate:.1f}%\n\n"
+        f"⏱ **الأداء:**\n"
+        f"• متوسط وقت التحميل: {escape_markdown(avg_time)}\n"
+        f"• إجمالي البيانات: {escape_markdown(total_data_str)}\n\n"
+        f"🏆 **أكثر المنصات استخداماً:**\n{platforms_text}\n\n"
+        f"👑 **أنشط المستخدمين:**\n{users_text}"
+    )
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+
+# ==============================================================================
+# 13. معالج الروابط (متزامن ومحسّن)
+# ==============================================================================
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    url = update.message.text.strip()
+    
+    if not is_valid_url(url):
+        await update.message.reply_text("⚠️ رابط غير صالح")
+        return
+    
+    if not await check_rate_limit(user.id):
+        await update.message.reply_text("⏱ تجاوزت الحد (5 طلبات/دقيقة). انتظر قليلاً")
+        return
+    
+    # فحص عدد التحميلات النشطة
+    if active_downloads[user.id] >= 3:
+        await update.message.reply_text("⚠️ لديك 3 تحميلات نشطة بالفعل. انتظر حتى تنتهي")
+        return
+    
+    # زيادة عداد التحميلات النشطة
+    active_downloads[user.id] += 1
+    start_time = time.time()
+    
+    # استخدام Semaphore للحد من التحميلات الكلية
+    async with download_semaphore:
+        msg = await update.message.reply_text("⏳ جارٍ التحليل...")
+        platform = detect_platform(url)
+        files = []
+        
+        try:
+            if platform == 'instagram':
+                files = await run_gallery_dl(url)
+                await msg.edit_text("⚡️ جارٍ الرفع...")
+                
+                if len(files) == 1:
+                    fp = Path(files[0])
+                    size = fp.stat().st_size if fp.exists() else 0
+                    
+                    if fp.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
+                        await context.bot.send_photo(update.effective_chat.id, open(fp, 'rb'), caption="✅ تم")
+                    else:
+                        await context.bot.send_video(update.effective_chat.id, open(fp, 'rb'), 
+                                                    caption="✅ تم", supports_streaming=True)
+                    
+                    quality = 'N/A'
+                else:
+                    zip_path = DOWNLOAD_PATH / f"ig_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                    with zipfile.ZipFile(zip_path, 'w') as z:
+                        for f in files:
+                            z.write(f, Path(f).name)
+                    
+                    size = zip_path.stat().st_size
+                    await context.bot.send_document(update.effective_chat.id, open(zip_path, 'rb'), 
+                                                   caption=f"✅ {len(files)} ملف")
+                    files.append(str(zip_path))
+                    quality = 'ZIP'
+                
+                await msg.delete()
+                duration = time.time() - start_time
+                log_download(user.id, user.username, url, platform, True, 
+                           file_size=size, quality=quality, duration=duration)
+            
+            else:
+                info = await run_ydl_analysis(url)
+                context.user_data[msg.message_id] = info
+                
+                if platform == 'youtube':
+                    caption, keyboard = build_youtube_ui(info, msg.message_id)
+                else:
+                    caption, keyboard = build_generic_ui(info, msg.message_id)
+                
+                thumb = info.get('thumbnail')
+                
+                if thumb:
+                    await msg.delete()
+                    await context.bot.send_photo(update.effective_chat.id, thumb, caption=caption,
+                                                parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+                else:
+                    await msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        
+        except (AnalysisError, DownloadError) as e:
+            error_str = str(e)
+            try:
+                await msg.edit_text(f"❌ فشل التحميل\n\n{escape_markdown(error_str)}", 
+                                   parse_mode=ParseMode.MARKDOWN_V2)
+            except:
+                await msg.edit_text(f"❌ فشل التحميل\n\n{error_str}")
+            log_download(user.id, user.username, url, platform, False, error_str)
+        
+        except Exception as e:
+            error_str = str(e)
+            logging.error(f"خطأ غير متوقع: {e}", exc_info=True)
+            try:
+                await msg.edit_text(f"❌ خطأ غير متوقع\n\n{escape_markdown(error_str)}", 
+                                   parse_mode=ParseMode.MARKDOWN_V2)
+            except:
+                await msg.edit_text(f"❌ خطأ غير متوقع\n\n{error_str}")
+            log_download(user.id, user.username, url, platform, False, error_str)
+        
+        finally:
+            # تقليل عداد التحميلات النشطة
+            active_downloads[user.id] -= 1
+            
+            # تنظيف الملفات
+            for f in files:
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except Exception as e:
+                    logging.warning(f"فشل حذف {f}: {e}")
+
+# ==============================================================================
+# 14. معالج الأزرار
+# ==============================================================================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        handler_type, action, resource_id, msg_id_str = query.data.split(':')
+        msg_id = int(msg_id_str)
+    except ValueError:
+        await query.message.delete()
+        return
+    
+    if handler_type == "ignore":
+        await query.answer("⚠️ الملف أكبر من 50MB", show_alert=True)
+        return
+    
+    if handler_type == "cancel":
+        await query.message.delete()
+        if msg_id in context.user_data:
+            del context.user_data[msg_id]
+        return
+    
+    if msg_id not in context.user_data:
+        await query.edit_message_text("⚠️ انتهت الجلسة")
+        return
+    
+    info = context.user_data[msg_id]
+    url = info.get('webpage_url')
+    user = query.from_user
+    platform = detect_platform(url)
+    
+    if handler_type == "qualities":
+        keyboard = build_qualities_ui(info, msg_id)
+        try:
+            await query.message.edit_reply_markup(reply_markup=keyboard)
+        except BadRequest:
+            pass
+        return
+    
+    if handler_type == "back":
+        if platform == 'youtube':
+            caption, keyboard = build_youtube_ui(info, msg_id)
+        else:
+            caption, keyboard = build_generic_ui(info, msg_id)
+        
+        try:
+            await query.message.edit_caption(caption=caption, parse_mode=ParseMode.MARKDOWN_V2, 
+                                           reply_markup=keyboard)
+        except BadRequest:
+            await query.message.edit_text(text=caption, parse_mode=ParseMode.MARKDOWN_V2, 
+                                         reply_markup=keyboard)
+        return
+    
+    # فحص عدد التحميلات النشطة
+    if active_downloads[user.id] >= 3:
+        await query.answer("⚠️ لديك 3 تحميلات نشطة. انتظر حتى تنتهي", show_alert=True)
+        return
+    
+    # فحص الحجم قبل التحميل
+    try:
+        is_audio = (action == 'a')
+        target_fmt = None
+        
+        if is_audio:
+            audio_fmts = [f for f in info.get('formats', []) 
+                         if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+            target_fmt = max(audio_fmts, key=lambda x: x.get('abr', 0), default=None)
+        else:
+            if resource_id == 'best':
+                video_fmts = [f for f in info.get('formats', []) 
+                             if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
+                target_fmt = max(video_fmts, key=lambda x: x.get('height', 0), default=None)
+            else:
+                target_fmt = next((f for f in info.get('formats', []) 
+                                  if f.get('format_id') == resource_id), None)
+        
+        if target_fmt:
+            size = target_fmt.get('filesize') or target_fmt.get('filesize_approx')
+            if size and size > MAX_FILE_SIZE:
+                await query.message.delete()
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ الملف كبير جداً ({format_size(size)})\n\n💡 جرب جودة أقل أو MP3"
+                )
+                if msg_id in context.user_data:
+                    del context.user_data[msg_id]
+                return
+    except Exception as e:
+        logging.warning(f"فشل فحص الحجم: {e}")
+    
+    # زيادة عداد التحميلات النشطة
+    active_downloads[user.id] += 1
+    start_time = time.time()
+    
+    # إزالة الأزرار
+    await query.edit_message_reply_markup(None)
+    try:
+        caption = query.message.caption_markdown_v2 or ""
+        await query.message.edit_caption(
+            caption=caption + escape_markdown("\n\n⏳ جارٍ التحميل..."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    except BadRequest:
+        pass
+    
+    file_path = None
+    
+    # استخدام Semaphore للحد من التحميلات الكلية
+    async with download_semaphore:
+        try:
+            is_audio = (action == 'a')
+            file_path = await run_ydl_download(url, resource_id, is_audio)
+            
+            # فحص الحجم الفعلي
+            if os.path.exists(file_path):
+                actual_size = os.path.getsize(file_path)
+                if actual_size > MAX_FILE_SIZE:
+                    await query.message.delete()
+                    await context.bot.send_message(
+                        query.message.chat_id,
+                        f"❌ الملف المحمّل ({format_size(actual_size)}) أكبر من 50MB"
+                    )
+                    if msg_id in context.user_data:
+                        del context.user_data[msg_id]
+                    return
+            
+            # تحديث الرسالة
+            try:
+                await query.message.edit_caption(
+                    caption=escape_markdown("⚡️ جارٍ الرفع..."),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except BadRequest:
+                pass
+            
+            title = info.get('title', 'تحميل')
+            
+            if is_audio:
+                await context.bot.send_audio(
+                    query.message.chat_id,
+                    open(file_path, 'rb'),
+                    title=title[:64],
+                    caption="✅ تم التحميل"
+                )
+                quality = 'MP3'
+            else:
+                # تحديد الجودة
+                quality = 'Unknown'
+                try:
+                    if resource_id == 'best':
+                        vfmts = [f for f in info.get('formats', []) if f.get('vcodec') != 'none']
+                        if vfmts:
+                            quality = f"{max(f.get('height', 0) for f in vfmts)}p"
+                    else:
+                        tfmt = next((f for f in info.get('formats', []) 
+                                    if f.get('format_id') == resource_id), None)
+                        if tfmt:
+                            quality = f"{tfmt.get('height', 0)}p"
+                except:
+                    pass
+                
+                await context.bot.send_video(
+                    query.message.chat_id,
+                    open(file_path, 'rb'),
+                    caption=f"✅ {escape_markdown(title[:200])}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    supports_streaming=True
+                )
+            
+            await query.message.delete()
+            
+            size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            duration = time.time() - start_time
+            log_download(user.id, user.username, url, platform, True, 
+                        file_size=size, quality=quality, duration=duration)
+        
+        except (DownloadError, Exception) as e:
+            error_str = str(e)
+            logging.error(f"خطأ في التحميل: {e}", exc_info=True)
+            try:
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ فشل التحميل: {escape_markdown(error_str)}",
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except:
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ فشل التحميل: {error_str}"
+                )
+            log_download(user.id, user.username, url, platform, False, error_str)
+        
+        finally:
+            # تقليل عداد التحميلات النشطة
+            active_downloads[user.id] -= 1
+            
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    logging.warning(f"فشل حذف الملف: {e}")
+            
+            if msg_id in context.user_data:
+                del context.user_data[msg_id]
+
+# ==============================================================================
+# 15. معالج الأخطاء العام
+# ==============================================================================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("خطأ في التحديث:", exc_info=context.error)
+    
+    if update and isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("❌ حدث خطأ غير متوقع. تم تسجيله.")
+        except:
+            pass
+
+# ==============================================================================
+# 16. Flask للصحة
+# ==============================================================================
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return "OK", 200
+
+@flask_app.route('/stats')
+def stats_api():
+    stats = get_stats()
+    if stats:
+        # تحويل لـ JSON-friendly
+        return {
+            'users': stats['users'],
+            'total_downloads': stats['total'],
+            'successful': stats['success'],
+            'failed': stats['failed'],
+            'today': stats['today'],
+            'success_rate': round((stats['success'] / stats['total'] * 100) if stats['total'] > 0 else 0, 2),
+            'total_data_mb': round(stats['total_data'] / (1024 * 1024), 2),
+            'top_platforms': [{'platform': p[0], 'count': p[1]} for p in stats['top_platforms']]
+        }, 200
+    return {"error": "Failed to fetch stats"}, 500
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=PORT)
+
+# ==============================================================================
+# 17. التطبيق الرئيسي
+# ==============================================================================
+def main():
+    # تهيئة قاعدة البيانات
+    init_db()
+    
+    # تشغيل Flask
+    threading.Thread(target=run_flask, daemon=True).start()
+    logging.info(f"✅ Flask يعمل على منفذ {PORT}")
+    
+    # إنشاء التطبيق
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # إضافة المعالجات
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
+    
+    # بدء التنظيف الدوري
+    loop = asyncio.get_event_loop()
+    loop.create_task(periodic_cleanup())
+    
+    logging.info("🚀 البوت يعمل الآن - جميع الميزات نشطة!")
+    logging.info(f"📊 قاعدة البيانات: {DB_PATH}")
+    logging.info(f"📁 مجلد التحميل: {DOWNLOAD_PATH}")
+    logging.info(f"👤 الأدمن: {ADMIN_ID}")
+    
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    if not BOT_TOKEN:
+        logging.fatal("❌ خطأ: BOT_TOKEN غير معرف!")
+        exit(1)
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.info("⏹ توقف البوت بواسطة المستخدم")
+    except Exception as e:
+        logging.fatal(f"💥 خطأ فادح: {e}", exc_info=True)
+        exit(1), file_size: int = None, quality: str = None):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
@@ -1309,4 +1756,223 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.message.edit_reply_markup(reply_markup=keyboard)
         except BadRequest:
-  
+            pass
+        return
+    
+    if handler_type == "back":
+        if platform == 'youtube':
+            caption, keyboard = build_youtube_ui(info, msg_id)
+        else:
+            caption, keyboard = build_generic_ui(info, msg_id)
+        
+        try:
+            await query.message.edit_caption(caption=caption, parse_mode=ParseMode.MARKDOWN_V2, 
+                                           reply_markup=keyboard)
+        except BadRequest:
+            await query.message.edit_text(text=caption, parse_mode=ParseMode.MARKDOWN_V2, 
+                                         reply_markup=keyboard)
+        return
+    
+    # فحص الحجم قبل التحميل
+    try:
+        is_audio = (action == 'a')
+        target_fmt = None
+        
+        if is_audio:
+            audio_fmts = [f for f in info.get('formats', []) 
+                         if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+            target_fmt = max(audio_fmts, key=lambda x: x.get('abr', 0), default=None)
+        else:
+            if resource_id == 'best':
+                video_fmts = [f for f in info.get('formats', []) 
+                             if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
+                target_fmt = max(video_fmts, key=lambda x: x.get('height', 0), default=None)
+            else:
+                target_fmt = next((f for f in info.get('formats', []) 
+                                  if f.get('format_id') == resource_id), None)
+        
+        if target_fmt:
+            size = target_fmt.get('filesize') or target_fmt.get('filesize_approx')
+            if size and size > MAX_FILE_SIZE:
+                await query.message.delete()
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ الملف كبير جداً ({format_size(size)})\n\n💡 جرب جودة أقل أو MP3"
+                )
+                if msg_id in context.user_data:
+                    del context.user_data[msg_id]
+                return
+    except Exception as e:
+        logging.warning(f"فشل فحص الحجم: {e}")
+    
+    # إزالة الأزرار
+    await query.edit_message_reply_markup(None)
+    try:
+        caption = query.message.caption_markdown_v2 or ""
+        await query.message.edit_caption(
+            caption=caption + escape_markdown("\n\n⏳ جارٍ التحميل..."),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    except BadRequest:
+        pass
+    
+    file_path = None
+    
+    # استخدام Lock للمستخدم الحالي
+    async with user_locks[user.id]:
+        try:
+            is_audio = (action == 'a')
+            file_path = await run_ydl_download(url, resource_id, is_audio)
+            
+            # فحص الحجم الفعلي
+            if os.path.exists(file_path):
+                actual_size = os.path.getsize(file_path)
+                if actual_size > MAX_FILE_SIZE:
+                    await query.message.delete()
+                    await context.bot.send_message(
+                        query.message.chat_id,
+                        f"❌ الملف المحمّل ({format_size(actual_size)}) أكبر من 50MB"
+                    )
+                    if msg_id in context.user_data:
+                        del context.user_data[msg_id]
+                    return
+            
+            # تحديث الرسالة
+            try:
+                await query.message.edit_caption(
+                    caption=escape_markdown("⚡️ جارٍ الرفع..."),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except BadRequest:
+                pass
+            
+            title = info.get('title', 'تحميل')
+            
+            if is_audio:
+                await context.bot.send_audio(
+                    query.message.chat_id,
+                    open(file_path, 'rb'),
+                    title=title[:64],
+                    caption="✅ تم التحميل"
+                )
+                quality = 'MP3'
+            else:
+                # تحديد الجودة
+                quality = 'Unknown'
+                try:
+                    if resource_id == 'best':
+                        vfmts = [f for f in info.get('formats', []) if f.get('vcodec') != 'none']
+                        if vfmts:
+                            quality = f"{max(f.get('height', 0) for f in vfmts)}p"
+                    else:
+                        tfmt = next((f for f in info.get('formats', []) 
+                                    if f.get('format_id') == resource_id), None)
+                        if tfmt:
+                            quality = f"{tfmt.get('height', 0)}p"
+                except:
+                    pass
+                
+                await context.bot.send_video(
+                    query.message.chat_id,
+                    open(file_path, 'rb'),
+                    caption=f"✅ {escape_markdown(title[:200])}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    supports_streaming=True
+                )
+            
+            await query.message.delete()
+            
+            size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            log_download(user.id, user.username, url, platform, True, file_size=size, quality=quality)
+        
+        except (DownloadError, Exception) as e:
+            logging.error(f"خطأ في التحميل: {e}", exc_info=True)
+            try:
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ فشل التحميل: {escape_markdown(str(e))}",
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except:
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ فشل التحميل: {str(e)}"
+                )
+            log_download(user.id, user.username, url, platform, False, str(e))
+        
+        finally:
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    logging.warning(f"فشل حذف الملف: {e}")
+            
+            if msg_id in context.user_data:
+                del context.user_data[msg_id]
+
+# ==============================================================================
+# 14. معالج الأخطاء العام
+# ==============================================================================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("خطأ في التحديث:", exc_info=context.error)
+    
+    if update and isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("❌ حدث خطأ غير متوقع")
+        except:
+            pass
+
+# ==============================================================================
+# 15. Flask للصحة
+# ==============================================================================
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return "OK", 200
+
+@flask_app.route('/stats')
+def stats_api():
+    stats = get_stats()
+    return stats if stats else {"error": "Failed"}, 500 if not stats else 200
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=PORT)
+
+# ==============================================================================
+# 16. التطبيق الرئيسي
+# ==============================================================================
+def main():
+    init_db()
+    
+    threading.Thread(target=run_flask, daemon=True).start()
+    logging.info(f"Flask يعمل على منفذ {PORT}")
+    
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
+    
+    # بدء التنظيف الدوري
+    loop = asyncio.get_event_loop()
+    loop.create_task(periodic_cleanup())
+    
+    logging.info("🚀 البوت يعمل الآن!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    if not BOT_TOKEN:
+        logging.fatal("خطأ: BOT_TOKEN غير معرف!")
+        exit(1)
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.info("توقف البوت")
+    except Exception as e:
+        logging.fatal(f"خطأ فادح: {e}", exc_info=True)
+        exit(1)
