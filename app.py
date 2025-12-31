@@ -41,7 +41,6 @@ USER_AGENTS = [
 ]
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-MAX_REQUESTS_PER_MINUTE = 5
 CLEANUP_INTERVAL = 1800
 FILE_MAX_AGE = 3600
 CACHE_TTL = 600
@@ -195,20 +194,34 @@ async def cleanup_old_cache():
         logging.error(f"فشل تنظيف الكاش: {e}")
 
 # ==============================================================================
-# 4. Rate Limiting
+# 4. إدارة الجلسات (Session Management)
 # ==============================================================================
-user_requests = defaultdict(list)
-user_locks = defaultdict(asyncio.Lock)
+# كل مستخدم له جلسة مستقلة تماماً
+user_sessions = {}  # {user_id: {'task': asyncio.Task, 'msg_id': int, 'info': dict}}
 
-async def check_rate_limit(user_id: int) -> bool:
-    now = datetime.now()
-    user_requests[user_id] = [t for t in user_requests[user_id] if now - t < timedelta(minutes=1)]
-    
-    if len(user_requests[user_id]) >= MAX_REQUESTS_PER_MINUTE:
-        return False
-    
-    user_requests[user_id].append(now)
-    return True
+def get_user_session(user_id: int):
+    """الحصول على جلسة المستخدم أو إنشاء واحدة جديدة"""
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            'task': None,
+            'msg_id': None,
+            'info': None,
+            'lock': asyncio.Lock()
+        }
+    return user_sessions[user_id]
+
+def cancel_user_session(user_id: int):
+    """إلغاء جلسة المستخدم الحالية"""
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        if session['task'] and not session['task'].done():
+            session['task'].cancel()
+        user_sessions[user_id] = {
+            'task': None,
+            'msg_id': None,
+            'info': None,
+            'lock': asyncio.Lock()
+        }
 
 # ==============================================================================
 # 5. التنظيف
@@ -495,10 +508,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Facebook 👥 • Twitter 🐦\n"
         f"• TikTok 🎵 وأكثر\\.\\.\\.\n\n"
         f"✨ **المميزات:**\n"
-        f"• 🚀 تحميل متزامن لعدة مستخدمين\n"
+        f"• 🚀 جلسة مستقلة لكل مستخدم\n"
+        f"• ⚡️ تحميل فوري بدون انتظار\n"
         f"• 💾 تخزين مؤقت ذكي\n"
+        f"• 📊 عرض الحجم قبل التحميل\n"
         f"• 🔄 إعادة محاولة تلقائية\n"
-        f"• 📊 إحصائيات مفصلة\n\n"
+        f"• ♾️ بدون حد للطلبات\n\n"
         f"📌 أرسل رابط الفيديو\\!\n\n"
         f"/help \\- المساعدة"
     )
@@ -515,11 +530,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 اختر الجودة\n"
         "🔹 انتظر التحميل\n\n"
         "⚠️ **حدود:**\n"
-        "• 50 ميغابايت كحد أقصى\n"
-        "• 5 طلبات/دقيقة\n\n"
+        "• 50 ميغابايت كحد أقصى للملف\n\n"
         "✨ **مميزات:**\n"
-        "• تحميل متزامن\n"
+        "• جلسة مستقلة لكل مستخدم\n"
+        "• عرض الحجم قبل التحميل\n"
         "• كاش ذكي\n"
+        "• بدون حد للطلبات\n"
         "• إعادة محاولة تلقائية"
     )
     
@@ -551,7 +567,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(escape_markdown(text), parse_mode=ParseMode.MARKDOWN_V2)
 
 # ==============================================================================
-# 12. معالج الروابط (متزامن)
+# 12. معالج الروابط (جلسة مستقلة لكل مستخدم)
 # ==============================================================================
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -561,12 +577,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ رابط غير صالح")
         return
     
-    if not await check_rate_limit(user.id):
-        await update.message.reply_text("⏱ تجاوزت الحد (5 طلبات/دقيقة)")
-        return
+    # الحصول على جلسة المستخدم
+    session = get_user_session(user.id)
     
-    # استخدام Lock لكل مستخدم للتزامن
-    async with user_locks[user.id]:
+    # إنشاء مهمة جديدة لهذا المستخدم
+    async def process_download():
         msg = await update.message.reply_text("⏳ جارٍ التحليل...")
         platform = detect_platform(url)
         files = []
@@ -581,9 +596,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     size = fp.stat().st_size if fp.exists() else 0
                     
                     if fp.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
-                        await context.bot.send_photo(update.effective_chat.id, open(fp, 'rb'), caption="✅ تم")
+                        await context.bot.send_photo(update.effective_chat.id, open(fp, 'rb'), 
+                                                    caption=f"✅ تم ({format_size(size)})")
                     else:
-                        await context.bot.send_video(update.effective_chat.id, open(fp, 'rb'), caption="✅ تم")
+                        await context.bot.send_video(update.effective_chat.id, open(fp, 'rb'), 
+                                                    caption=f"✅ تم ({format_size(size)})")
                     
                     quality = 'N/A'
                 else:
@@ -594,7 +611,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     size = zip_path.stat().st_size
                     await context.bot.send_document(update.effective_chat.id, open(zip_path, 'rb'), 
-                                                   caption=f"✅ {len(files)} ملف")
+                                                   caption=f"✅ {len(files)} ملف ({format_size(size)})")
                     files.append(str(zip_path))
                     quality = 'ZIP'
                 
@@ -603,6 +620,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             else:
                 info = await run_ydl_analysis(url)
+                
+                # حفظ المعلومات في جلسة المستخدم
+                session['msg_id'] = msg.message_id
+                session['info'] = info
                 context.user_data[msg.message_id] = info
                 
                 if platform == 'youtube':
@@ -618,6 +639,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                 parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
                 else:
                     await msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        
+        except asyncio.CancelledError:
+            await msg.edit_text("⚠️ تم إلغاء العملية")
+            raise
         
         except (AnalysisError, DownloadError) as e:
             try:
@@ -643,6 +668,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         os.remove(f)
                 except Exception as e:
                     logging.warning(f"فشل حذف {f}: {e}")
+    
+    # إنشاء المهمة وحفظها في الجلسة
+    session['task'] = asyncio.create_task(process_download())
+    
+    try:
+        await session['task']
+    except asyncio.CancelledError:
+        logging.info(f"تم إلغاء مهمة المستخدم {user.id}")
+    except Exception as e:
+        logging.error(f"خطأ في مهمة المستخدم {user.id}: {e}")
 
 # ==============================================================================
 # 13. معالج الأزرار
@@ -666,6 +701,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         if msg_id in context.user_data:
             del context.user_data[msg_id]
+        # إلغاء جلسة المستخدم
+        cancel_user_session(user.id)
         return
     
     if msg_id not in context.user_data:
@@ -744,9 +781,102 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     file_path = None
     
-    # استخدام Lock للمستخدم الحالي
-    async with user_locks[user.id]:
+    # الحصول على جلسة المستخدم واستخدامها
+    session = get_user_session(user.id)
+    
+    async def download_task():
+        nonlocal file_path
+        
         try:
+            is_audio = (action == 'a')
+            file_path = await run_ydl_download(url, resource_id, is_audio)
+            
+            # فحص الحجم الفعلي
+            if os.path.exists(file_path):
+                actual_size = os.path.getsize(file_path)
+                if actual_size > MAX_FILE_SIZE:
+                    await query.message.delete()
+                    await context.bot.send_message(
+                        query.message.chat_id,
+                        f"❌ الملف المحمّل ({format_size(actual_size)}) أكبر من 50MB"
+                    )
+                    if msg_id in context.user_data:
+                        del context.user_data[msg_id]
+                    return
+            
+            # تحديث الرسالة
+            try:
+                await query.message.edit_caption(
+                    caption=escape_markdown("⚡️ جارٍ الرفع..."),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except BadRequest:
+                pass
+            
+            title = info.get('title', 'تحميل')
+            
+            if is_audio:
+                await context.bot.send_audio(
+                    query.message.chat_id,
+                    open(file_path, 'rb'),
+                    title=title[:64],
+                    caption="✅ تم التحميل"
+                )
+                quality = 'MP3'
+            else:
+                # تحديد الجودة
+                quality = 'Unknown'
+                try:
+                    if resource_id == 'best':
+                        vfmts = [f for f in info.get('formats', []) if f.get('vcodec') != 'none']
+                        if vfmts:
+                            quality = f"{max(f.get('height', 0) for f in vfmts)}p"
+                    else:
+                        tfmt = next((f for f in info.get('formats', []) 
+                                    if f.get('format_id') == resource_id), None)
+                        if tfmt:
+                            quality = f"{tfmt.get('height', 0)}p"
+                except:
+                    pass
+                
+                await context.bot.send_video(
+                    query.message.chat_id,
+                    open(file_path, 'rb'),
+                    caption=f"✅ {escape_markdown(title[:200])}",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    supports_streaming=True
+                )
+            
+            await query.message.delete()
+            
+            size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            log_download(user.id, user.username, url, platform, True, file_size=size, quality=quality)
+        
+        except asyncio.CancelledError:
+            await query.message.edit_caption(caption="⚠️ تم إلغاء التحميل")
+            raise
+        
+        except (DownloadError, Exception) as e:
+            logging.error(f"خطأ في التحميل: {e}", exc_info=True)
+            try:
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ فشل التحميل: {escape_markdown(str(e))}",
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except:
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    f"❌ فشل التحميل: {str(e)}"
+                )
+            log_download(user.id, user.username, url, platform, False, str(e))
+        
+        finally:
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    logging.warning(f"فشل حذف الملف: {e}")
             is_audio = (action == 'a')
             file_path = await run_ydl_download(url, resource_id, is_audio)
             
@@ -835,6 +965,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if msg_id in context.user_data:
                 del context.user_data[msg_id]
+    
+    # إنشاء المهمة وتشغيلها
+    session['task'] = asyncio.create_task(download_task())
+    
+    try:
+        await session['task']
+    except asyncio.CancelledError:
+        logging.info(f"تم إلغاء تحميل المستخدم {user.id}")
+    except Exception as e:
+        logging.error(f"خطأ في تحميل المستخدم {user.id}: {e}")
 
 # ==============================================================================
 # 14. معالج الأخطاء العام
