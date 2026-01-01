@@ -1,4 +1,4 @@
-# requirements.txt
+# requirements.txt - الإصدار المعدل
 # 📦 جميع المكتبات المطلوبة للبوت
 
 # Telegram Bot
@@ -17,3 +17,6 @@ aiohttp>=3.9.0
 
 # معالجة البيانات
 python-dateutil>=2.8.2
+
+# 🔥 أضف هذه السطور لمعالجة الخطأ:
+psutil>=5.9.8  # مراقبة الأداء
