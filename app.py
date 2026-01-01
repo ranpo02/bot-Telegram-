@@ -1,4 +1,4 @@
-# app.py - الإصدار النهائي 18.1
+# app.py - الإصدار النهائي 19.0
 import logging
 import os
 import threading
@@ -11,11 +11,15 @@ import shutil
 import hashlib
 import json
 import time
+import html
+import multiprocessing
+import concurrent.futures
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
 import zipfile
 import functools
+import psutil
 
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -48,6 +52,11 @@ FILE_MAX_AGE = 3600
 CACHE_TTL = 600
 DOWNLOAD_TIMEOUT = 600
 MAX_CONCURRENT_DOWNLOADS = 5
+
+# Process Pool للعزل
+process_pool = concurrent.futures.ProcessPoolExecutor(
+    max_workers=MAX_CONCURRENT_DOWNLOADS
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
@@ -263,6 +272,16 @@ def get_ydl_opts(url: str) -> dict:
         'http_headers': {'User-Agent': random.choice(USER_AGENTS)},
         'outtmpl': str(DOWNLOAD_PATH / '%(id)s.%(ext)s'),
         'ffmpeg_location': '/usr/bin/ffmpeg',
+        
+        # 🔥 إعدادات لتقليل الحمل
+        'concurrent_fragment_downloads': 3,
+        'throttledratelimit': 100000,
+        'sleep_interval_requests': 1,
+        'sleep_interval': 1,
+        'nooverwrites': True,
+        'continuedl': True,
+        'noprogress': True,
+        'geo_bypass': True,
     }
     
     if 'facebook.com' not in url and 'fb.watch' not in url:
@@ -335,7 +354,19 @@ async def run_ydl_analysis(url: str) -> dict:
     except Exception as e:
         raise DownloadError(f"خطأ في التحليل: {str(e)}")
 
+def download_in_process(url: str, opts: dict, is_audio: bool) -> str:
+    """دالة عادية تعمل في Process منفصل"""
+    import yt_dlp
+    from pathlib import Path
+    
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+    
+    return str(Path(filename).with_suffix('.mp3')) if is_audio else filename
+
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
+    """تشغيل yt-dlp في process منفصل بعيد عن Event Loop"""
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     opts = get_ydl_opts(url)
     
@@ -349,18 +380,20 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
         opts['format'] = format_id
     
     try:
+        # 🔥 تشغيل في Process Pool معزول
         loop = asyncio.get_event_loop()
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    functools.partial(ydl.extract_info, url, download=True)
-                ),
-                timeout=DOWNLOAD_TIMEOUT
-            )
-            filename = ydl.prepare_filename(info)
         
-        return str(Path(filename).with_suffix('.mp3')) if is_audio else filename
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                process_pool,
+                download_in_process,
+                url, opts, is_audio
+            ),
+            timeout=DOWNLOAD_TIMEOUT
+        )
+        
+        return result
+        
     except asyncio.TimeoutError:
         raise DownloadError(f"انتهت مهلة التحميل ({DOWNLOAD_TIMEOUT} ثانية)")
     except Exception as e:
@@ -457,63 +490,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     logging.info(f"🚀 مستخدم {user.id} بدأ البوت")
     
+    # 🔥 استخدام HTML بدلاً من MarkdownV2
     welcome_text = (
-        f"👋 **مرحباً {escape_markdown(user.first_name)}!**\n\n"
-        f"🤖 **أنا بوت لتحميل الفيديوهات**\n\n"
-        f"🎯 **ماذا أستطيع فعل؟**\n"
-        f"• 📥 تحميل من **يوتيوب**\n"
-        f"• 📸 تحميل من **إنستغرام**\n"
-        f"• 👥 تحميل من **فيسبوك**\n"
-        f"• 🐦 تحميل من **تويتر/X**\n"
-        f"• 🎵 تحميل من **تيك توك**\n\n"
-        f"🚀 **كيفية الاستخدام:**\n"
+        f"👋 <b>مرحباً {html.escape(user.first_name)}!</b>\n\n"
+        f"🤖 <b>أنا بوت لتحميل الفيديوهات</b>\n\n"
+        f"🎯 <b>ماذا أستطيع فعل؟</b>\n"
+        f"• 📥 تحميل من <b>يوتيوب</b>\n"
+        f"• 📸 تحميل من <b>إنستغرام</b>\n"
+        f"• 👥 تحميل من <b>فيسبوك</b>\n"
+        f"• 🐦 تحميل من <b>تويتر/X</b>\n"
+        f"• 🎵 تحميل من <b>تيك توك</b>\n\n"
+        f"🚀 <b>كيفية الاستخدام:</b>\n"
         f"1. أرسل رابط الفيديو\n"
         f"2. اختر طريقة التحميل\n"
         f"3. انتظر حتى يتم الإرسال\n\n"
-        f"📌 **ملاحظات مهمة:**\n"
+        f"📌 <b>ملاحظات مهمة:</b>\n"
         f"• الحد الأقصى: 50 ميغابايت\n"
         f"• للفيديوهات الطويلة اختر جودة أقل\n\n"
-        f"🔧 **الأوامر:**\n"
+        f"🔧 <b>الأوامر:</b>\n"
         f"/start - عرض هذه الرسالة\n"
         f"/help - المساعدة والتفاصيل\n"
     )
     
     if str(user.id) == ADMIN_ID:
-        welcome_text += f"\n⚙️ **أوامر الإدارة:**\n/stats - عرض الإحصائيات"
+        welcome_text += f"\n⚙️ <b>أوامر الإدارة:</b>\n/stats - عرض الإحصائيات"
     
-    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(
+        welcome_text, 
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     logging.info(f"📖 مستخدم {user.id} طلب المساعدة")
     
     help_text = (
-        f"📖 **دليل الاستخدام الكامل**\n\n"
-        f"🎬 **المنصات المدعومة:**\n"
+        f"📖 <b>دليل الاستخدام الكامل</b>\n\n"
+        f"🎬 <b>المنصات المدعومة:</b>\n"
         f"• YouTube (يوتيوب)\n"
         f"• Instagram (إنستغرام)\n"
         f"• Facebook (فيسبوك)\n"
         f"• Twitter/X (تويتر)\n"
         f"• TikTok (تيك توك)\n"
         f"• معظم المواقع الأخرى\n\n"
-        f"⚡ **طريقة العمل:**\n"
+        f"⚡ <b>طريقة العمل:</b>\n"
         f"1. أرسل رابط الفيديو\n"
         f"2. اختر 'تحميل فيديو' أو 'تحميل صوت'\n"
         f"3. للفيديوهات الطويلة، اختر جودة أقل\n"
         f"4. انتظر حتى يرسل لك البوت الملف\n\n"
-        f"⚠️ **المعلومات المهمة:**\n"
+        f"⚠️ <b>المعلومات المهمة:</b>\n"
         f"• الحد الأقصى لحجم الملف: 50 ميغابايت\n"
         f"• إذا كان الفيديو طويلاً (>10 دقائق)، اختر جودة 480p أو أقل\n"
         f"• للفيديوهات الطويلة جداً، استخدم 'تحميل صوت' لتقليل الحجم\n\n"
-        f"❓ **استفسارات شائعة:**\n"
+        f"❓ <b>استفسارات شائعة:</b>\n"
         f"• لماذا لا يعمل الرابط؟ - قد يكون الفيديو محمياً أو غير متاح\n"
         f"• لماذا الملف كبير؟ - اختر جودة أقل في المرة القادمة\n"
         f"• لماذا يأخذ وقتاً؟ - الفيديوهات الطويلة تحتاج وقتاً أطول"
     )
     
     await update.message.reply_text(
-        escape_markdown(help_text),
-        parse_mode=ParseMode.MARKDOWN_V2
+        help_text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -543,17 +582,18 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_rate = (success / total * 100) if total > 0 else 0
         
         stats_text = (
-            f"📊 **إحصائيات البوت**\n\n"
-            f"👥 **المستخدمون:** {users}\n"
-            f"📥 **إجمالي التحميلات:** {total}\n"
-            f"✅ **النجاح:** {success}\n"
-            f"📈 **نسبة النجاح:** {success_rate:.1f}%\n"
-            f"📅 **اليوم:** {today}"
+            f"📊 <b>إحصائيات البوت</b>\n\n"
+            f"👥 <b>المستخدمون:</b> {users}\n"
+            f"📥 <b>إجمالي التحميلات:</b> {total}\n"
+            f"✅ <b>النجاح:</b> {success}\n"
+            f"📈 <b>نسبة النجاح:</b> {success_rate:.1f}%\n"
+            f"📅 <b>اليوم:</b> {today}"
         )
         
         await update.message.reply_text(
-            escape_markdown(stats_text),
-            parse_mode=ParseMode.MARKDOWN_V2
+            stats_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
         )
     except Exception as e:
         await update.message.reply_text("❌ حدث خطأ في جلب الإحصائيات")
@@ -887,7 +927,43 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # ==============================================================================
-# 14. خادم Flask للصحة
+# 14. مراقبة الأداء
+# ==============================================================================
+def monitor_performance():
+    """مراقبة أداء النظام"""
+    while True:
+        time.sleep(60)  # كل دقيقة
+        
+        try:
+            # قياس استخدام الموارد
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            
+            # قياس طول طابور asyncio (تقريبي)
+            pending_tasks = len([t for t in asyncio.all_tasks() if not t.done()])
+            
+            logging.info(f"📊 مراقبة الأداء: CPU={cpu_percent}%, Memory={memory.percent}%, Tasks={pending_tasks}")
+            
+            # إذا كان الحمل عالياً، تخفيض التحميلات المتزامنة
+            global MAX_CONCURRENT_DOWNLOADS
+            if cpu_percent > 80 or memory.percent > 80:
+                new_limit = max(1, MAX_CONCURRENT_DOWNLOADS - 1)
+                if new_limit != MAX_CONCURRENT_DOWNLOADS:
+                    MAX_CONCURRENT_DOWNLOADS = new_limit
+                    download_semaphore._value = new_limit
+                    logging.warning(f"⚠️ تقليل التحميلات المتزامنة إلى {MAX_CONCURRENT_DOWNLOADS}")
+            
+            # إذا كان الحمل منخفضاً، زيادة التحميلات المتزامنة
+            elif cpu_percent < 30 and memory.percent < 50 and MAX_CONCURRENT_DOWNLOADS < 10:
+                MAX_CONCURRENT_DOWNLOADS = min(10, MAX_CONCURRENT_DOWNLOADS + 1)
+                download_semaphore._value = MAX_CONCURRENT_DOWNLOADS
+                logging.info(f"📈 زيادة التحميلات المتزامنة إلى {MAX_CONCURRENT_DOWNLOADS}")
+                
+        except Exception as e:
+            logging.error(f"❌ خطأ في مراقبة الأداء: {e}")
+
+# ==============================================================================
+# 15. خادم Flask للصحة
 # ==============================================================================
 flask_app = Flask(__name__)
 
@@ -900,7 +976,7 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=PORT)
 
 # ==============================================================================
-# 15. التطبيق الرئيسي
+# 16. التطبيق الرئيسي
 # ==============================================================================
 def main():
     init_db()
@@ -910,16 +986,24 @@ def main():
     logging.info(f"📊 الإعدادات: MAX_CONCURRENT_DOWNLOADS={MAX_CONCURRENT_DOWNLOADS}")
     logging.info(f"📊 الإعدادات: DOWNLOAD_TIMEOUT={DOWNLOAD_TIMEOUT} ثانية")
     
+    # 🔥 تشغيل مراقبة الأداء
+    threading.Thread(target=monitor_performance, daemon=True).start()
+    
     threading.Thread(target=run_flask, daemon=True).start()
     logging.info(f"🌐 خادم الصحة يعمل على المنفذ {PORT}")
     
+    # 🔥 إنشاء التطبيق مع groups للمعالجة المتوازية
     app = Application.builder().token(BOT_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    # 🔥 معالجات للأوامر السريعة (أولوية عالية) - Group 1
+    app.add_handler(CommandHandler("start", start), group=1)
+    app.add_handler(CommandHandler("help", help_command), group=1)
+    app.add_handler(CommandHandler("stats", stats_command), group=1)
+    
+    # 🔥 معالجات للتحميلات (أولوية منخفضة) - Group 2
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link), group=2)
+    app.add_handler(CallbackQueryHandler(button_handler), group=2)
+    
     app.add_error_handler(error_handler)
     
     loop = asyncio.get_event_loop()
@@ -927,7 +1011,14 @@ def main():
     
     logging.info("✅ البوت جاهز للاستخدام!")
     
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # 🔥 تشغيل مع إعدادات محسنة
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        poll_interval=0.1,
+        timeout=10,
+        drop_pending_updates=False,
+        close_loop=False
+    )
 
 if __name__ == '__main__':
     if not BOT_TOKEN:
@@ -938,6 +1029,8 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         logging.info("⏹ توقف البوت بواسطة المستخدم")
+        process_pool.shutdown(wait=True)
     except Exception as e:
         logging.fatal(f"💥 خطأ فادح: {e}", exc_info=True)
+        process_pool.shutdown(wait=True)
         exit(1)
