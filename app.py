@@ -1,4 +1,4 @@
-# app.py - الإصدار النهائي 18.0
+# app.py - الإصدار النهائي 18.0 معدل
 import logging
 import os
 import threading
@@ -11,6 +11,7 @@ import shutil
 import hashlib
 import json
 import time
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -31,8 +32,13 @@ PORT = int(os.getenv("PORT", 8080))
 ADMIN_ID = "5898628858"
 PRIMARY_PROXY = "154.3.236.202:3128"
 
-DOWNLOAD_PATH = Path("downloads")
-DB_PATH = Path("bot_stats.db")
+# استخدام مجلد مؤقت للتنزيلات
+DOWNLOAD_PATH = Path(tempfile.mkdtemp(prefix="downloads_"))
+
+# قاعدة البيانات في مجلد دائم إن أمكن
+DATA_DIR = Path("/data") if Path("/data").exists() else Path("data")
+DATA_DIR.mkdir(exist_ok=True, parents=True)
+DB_PATH = DATA_DIR / "bot_stats.db"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -40,13 +46,13 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB (مخفض لـ fly.io)
 MAX_REQUESTS_PER_MINUTE = 5
 CLEANUP_INTERVAL = 1800
 FILE_MAX_AGE = 3600
 CACHE_TTL = 600
 DOWNLOAD_TIMEOUT = 600
-MAX_CONCURRENT_DOWNLOADS = 5
+MAX_CONCURRENT_DOWNLOADS = 3  # مخفض لـ fly.io
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 for logger_name in ["httpx", "werkzeug", "telegram.ext.Application"]:
@@ -62,38 +68,41 @@ download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 # 3. قاعدة البيانات
 # ==============================================================================
 def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS downloads
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  username TEXT,
-                  url TEXT,
-                  platform TEXT,
-                  timestamp DATETIME,
-                  success BOOLEAN,
-                  error_message TEXT,
-                  file_size INTEGER,
-                  quality TEXT)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS user_stats
-                 (user_id INTEGER PRIMARY KEY,
-                  username TEXT,
-                  total_downloads INTEGER DEFAULT 0,
-                  successful_downloads INTEGER DEFAULT 0,
-                  failed_downloads INTEGER DEFAULT 0,
-                  first_use DATETIME,
-                  last_use DATETIME)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS cache
-                 (url_hash TEXT PRIMARY KEY,
-                  data TEXT,
-                  timestamp DATETIME)''')
-    
-    conn.commit()
-    conn.close()
-    logging.info("✅ قاعدة البيانات جاهزة")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        c = conn.cursor()
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS downloads
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      username TEXT,
+                      url TEXT,
+                      platform TEXT,
+                      timestamp DATETIME,
+                      success BOOLEAN,
+                      error_message TEXT,
+                      file_size INTEGER,
+                      quality TEXT)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS user_stats
+                     (user_id INTEGER PRIMARY KEY,
+                      username TEXT,
+                      total_downloads INTEGER DEFAULT 0,
+                      successful_downloads INTEGER DEFAULT 0,
+                      failed_downloads INTEGER DEFAULT 0,
+                      first_use DATETIME,
+                      last_use DATETIME)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS cache
+                     (url_hash TEXT PRIMARY KEY,
+                      data TEXT,
+                      timestamp DATETIME)''')
+        
+        conn.commit()
+        conn.close()
+        logging.info("✅ قاعدة البيانات جاهزة")
+    except Exception as e:
+        logging.error(f"❌ خطأ في تهيئة قاعدة البيانات: {e}")
 
 def log_download(user_id: int, username: str, url: str, platform: str, success: bool, 
                  error_msg: str = None, file_size: int = None, quality: str = None):
@@ -104,7 +113,7 @@ def log_download(user_id: int, username: str, url: str, platform: str, success: 
         c.execute('''INSERT INTO downloads (user_id, username, url, platform, timestamp, 
                      success, error_message, file_size, quality)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (user_id, username, url[:500], platform, datetime.now(), success, 
+                  (user_id, username or "", url[:500], platform, datetime.now(), success, 
                    error_msg, file_size, quality))
         
         c.execute('''INSERT INTO user_stats (user_id, username, total_downloads, 
@@ -115,7 +124,7 @@ def log_download(user_id: int, username: str, url: str, platform: str, success: 
                      successful_downloads = successful_downloads + ?,
                      failed_downloads = failed_downloads + ?,
                      last_use = ?''',
-                  (user_id, username, 1 if success else 0, 1 if not success else 0, 
+                  (user_id, username or "", 1 if success else 0, 1 if not success else 0, 
                    datetime.now(), datetime.now(),
                    1 if success else 0, 1 if not success else 0, datetime.now()))
         
@@ -164,14 +173,17 @@ user_requests = defaultdict(list)
 
 async def check_rate_limit(user_id: int) -> bool:
     now = datetime.now()
-    user_requests[user_id] = [
-        req_time for req_time in user_requests[user_id]
-        if now - req_time < timedelta(minutes=1)
-    ]
+    if user_id in user_requests:
+        user_requests[user_id] = [
+            req_time for req_time in user_requests[user_id]
+            if now - req_time < timedelta(minutes=1)
+        ]
     
-    if len(user_requests[user_id]) >= MAX_REQUESTS_PER_MINUTE:
+    if len(user_requests.get(user_id, [])) >= MAX_REQUESTS_PER_MINUTE:
         return False
     
+    if user_id not in user_requests:
+        user_requests[user_id] = []
     user_requests[user_id].append(now)
     return True
 
@@ -189,8 +201,11 @@ def cleanup_old_files():
             if file_path.is_file():
                 file_age = now - file_path.stat().st_mtime
                 if file_age > FILE_MAX_AGE:
-                    file_path.unlink()
-                    deleted += 1
+                    try:
+                        file_path.unlink()
+                        deleted += 1
+                    except:
+                        pass
         
         if deleted > 0:
             logging.info(f"🧹 تم تنظيف {deleted} ملف قديم")
@@ -209,15 +224,16 @@ def is_valid_url(url: str) -> bool:
     return bool(re.match(r'https?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', url))
 
 def detect_platform(url: str) -> str:
-    if 'youtube.com' in url or 'youtu.be' in url:
+    url_lower = url.lower()
+    if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
         return 'youtube'
-    elif 'instagram.com' in url:
+    elif 'instagram.com' in url_lower:
         return 'instagram'
-    elif 'facebook.com' in url or 'fb.watch' in url:
+    elif 'facebook.com' in url_lower or 'fb.watch' in url_lower:
         return 'facebook'
-    elif 'twitter.com' in url or 'x.com' in url:
+    elif 'twitter.com' in url_lower or 'x.com' in url_lower:
         return 'twitter'
-    elif 'tiktok.com' in url:
+    elif 'tiktok.com' in url_lower:
         return 'tiktok'
     else:
         return 'other'
@@ -244,8 +260,12 @@ def format_duration(seconds: int) -> str:
 def escape_markdown(text: str) -> str:
     if not text:
         return ""
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
+    # جميع الرموز الخاصة في Markdown V2
+    escape_chars = r'_*[]()~`>#+-=|{}.!?'
+    # تهريب كل الرموز
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 # ==============================================================================
 # 8. نظام التحميل
@@ -262,7 +282,7 @@ def get_ydl_opts(url: str) -> dict:
         'ffmpeg_location': '/usr/bin/ffmpeg',
     }
     
-    if 'facebook.com' not in url and 'fb.watch' not in url:
+    if 'facebook.com' not in url.lower() and 'fb.watch' not in url.lower():
         opts['proxy'] = PRIMARY_PROXY
     
     return opts
@@ -287,7 +307,7 @@ async def run_gallery_dl(url: str) -> list:
     
     if process.returncode != 0:
         error = stderr.decode('utf-8', errors='ignore')
-        raise DownloadError(f"فشل تحميل Instagram")
+        raise DownloadError(f"فشل تحميل Instagram: {error[:200]}")
     
     files = []
     for root, _, filenames in os.walk(DOWNLOAD_PATH):
@@ -318,7 +338,7 @@ async def run_ydl_analysis(url: str) -> dict:
         await set_cached_info(url, info)
         return info
     except Exception as e:
-        raise DownloadError(f"خطأ في التحليل: {str(e)}")
+        raise DownloadError(f"خطأ في التحليل: {str(e)[:200]}")
 
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     DOWNLOAD_PATH.mkdir(exist_ok=True)
@@ -340,13 +360,14 @@ async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
         
         return str(Path(filename).with_suffix('.mp3')) if is_audio else filename
     except Exception as e:
-        raise DownloadError(f"خطأ في التحميل: {str(e)}")
+        raise DownloadError(f"خطأ في التحميل: {str(e)[:200]}")
 
 # ==============================================================================
 # 9. واجهات المستخدم
 # ==============================================================================
 def build_simple_ui(info: dict, msg_id: int) -> tuple:
-    platform = detect_platform(info.get('webpage_url', ''))
+    url = info.get('webpage_url', '')
+    platform = detect_platform(url)
     title = info.get('title', 'فيديو')[:100]
     duration = info.get('duration', 0)
     
@@ -432,100 +453,114 @@ def build_qualities_ui(info: dict, msg_id: int) -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    welcome_text = (
-        f"👋 **مرحباً {escape_markdown(user.first_name)}!**\n\n"
-        f"🤖 **أنا بوت لتحميل الفيديوهات**\n\n"
-        f"🎯 **ماذا أستطيع فعل؟**\n"
-        f"• 📥 تحميل من **يوتيوب**\n"
-        f"• 📸 تحميل من **إنستغرام**\n"
-        f"• 👥 تحميل من **فيسبوك**\n"
-        f"• 🐦 تحميل من **تويتر/X**\n"
-        f"• 🎵 تحميل من **تيك توك**\n\n"
-        f"🚀 **كيفية الاستخدام:**\n"
-        f"1. أرسل رابط الفيديو\n"
-        f"2. اختر طريقة التحميل\n"
-        f"3. انتظر حتى يتم الإرسال\n\n"
-        f"📌 **ملاحظات مهمة:**\n"
-        f"• الحد الأقصى: 50 ميغابايت\n"
-        f"• للفيديوهات الطويلة اختر جودة أقل\n\n"
-        f"🔧 **الأوامر:**\n"
-        f"/start - عرض هذه الرسالة\n"
-        f"/help - المساعدة والتفاصيل\n"
-    )
+    welcome_text_lines = [
+        f"👋 **مرحباً {escape_markdown(user.first_name or 'مستخدم')}\\!**",
+        "",
+        f"🤖 **أنا بوت لتحميل الفيديوهات**",
+        "",
+        f"🎯 **ماذا أستطيع فعل\\؟**",
+        f"• 📥 تحميل من **يوتيوب**",
+        f"• 📸 تحميل من **إنستغرام**",
+        f"• 👥 تحميل من **فيسبوك**",
+        f"• 🐦 تحميل من **تويتر/X**",
+        f"• 🎵 تحميل من **تيك توك**",
+        "",
+        f"🚀 **كيفية الاستخدام\\:**",
+        f"1\\. أرسل رابط الفيديو",
+        f"2\\. اختر طريقة التحميل",
+        f"3\\. انتظر حتى يتم الإرسال",
+        "",
+        f"📌 **ملاحظات مهمة\\:**",
+        f"• الحد الأقصى\\: 25 ميغابايت",
+        f"• للفيديوهات الطويلة اختر جودة أقل",
+        "",
+        f"🔧 **الأوامر\\:**",
+        f"/start \\- عرض هذه الرسالة",
+        f"/help \\- المساعدة والتفاصيل",
+    ]
     
     if str(user.id) == ADMIN_ID:
-        welcome_text += f"\n⚙️ **أوامر الإدارة:**\n/stats - عرض الإحصائيات"
+        welcome_text_lines.extend([
+            "",
+            f"⚙️ **أوامر الإدارة\\:**",
+            f"/stats \\- عرض الإحصائيات"
+        ])
+    
+    welcome_text = "\n".join(welcome_text_lines)
     
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        f"📖 **دليل الاستخدام الكامل**\n\n"
-        f"🎬 **المنصات المدعومة:**\n"
-        f"• YouTube (يوتيوب)\n"
-        f"• Instagram (إنستغرام)\n"
-        f"• Facebook (فيسبوك)\n"
-        f"• Twitter/X (تويتر)\n"
-        f"• TikTok (تيك توك)\n"
-        f"• معظم المواقع الأخرى\n\n"
-        f"⚡ **طريقة العمل:**\n"
-        f"1. أرسل رابط الفيديو\n"
-        f"2. اختر 'تحميل فيديو' أو 'تحميل صوت'\n"
-        f"3. للفيديوهات الطويلة، اختر جودة أقل\n"
-        f"4. انتظر حتى يرسل لك البوت الملف\n\n"
-        f"⚠️ **المعلومات المهمة:**\n"
-        f"• الحد الأقصى لحجم الملف: 50 ميغابايت\n"
-        f"• إذا كان الفيديو طويلاً (>10 دقائق)، اختر جودة 480p أو أقل\n"
-        f"• للفيديوهات الطويلة جداً، استخدم 'تحميل صوت' لتقليل الحجم\n\n"
-        f"❓ **استفسارات شائعة:**\n"
-        f"• لماذا لا يعمل الرابط؟ - قد يكون الفيديو محمياً أو غير متاح\n"
-        f"• لماذا الملف كبير؟ - اختر جودة أقل في المرة القادمة\n"
-        f"• لماذا يأخذ وقتاً؟ - الفيديوهات الطويلة تحتاج وقتاً أطول"
-    )
+    help_text_lines = [
+        f"📖 **دليل الاستخدام الكامل**",
+        "",
+        f"🎬 **المنصات المدعومة\\:**",
+        f"• YouTube \\(يوتيوب\\)",
+        f"• Instagram \\(إنستغرام\\)",
+        f"• Facebook \\(فيسبوك\\)",
+        f"• Twitter/X \\(تويتر\\)",
+        f"• TikTok \\(تيك توك\\)",
+        f"• معظم المواقع الأخرى",
+        "",
+        f"⚡ **طريقة العمل\\:**",
+        f"1\\. أرسل رابط الفيديو",
+        f"2\\. اختر 'تحميل فيديو' أو 'تحميل صوت'",
+        f"3\\. للفيديوهات الطويلة، اختر جودة أقل",
+        f"4\\. انتظر حتى يرسل لك البوت الملف",
+        "",
+        f"⚠️ **المعلومات المهمة\\:**",
+        f"• الحد الأقصى لحجم الملف\\: 25 ميغابايت",
+        f"• إذا كان الفيديو طويلاً \\(\\>10 دقائق\\)، اختر جودة 480p أو أقل",
+        f"• للفيديوهات الطويلة جداً، استخدم 'تحميل صوت' لتقليل الحجم",
+        "",
+        f"❓ **استفسارات شائعة\\:**",
+        f"• لماذا لا يعمل الرابط\\؟ \\- قد يكون الفيديو محمياً أو غير متاح",
+        f"• لماذا الملف كبير\\؟ \\- اختر جودة أقل في المرة القادمة",
+        f"• لماذا يأخذ وقتاً\\؟ \\- الفيديوهات الطويلة تحتاج وقتاً أطول"
+    ]
     
-    await update.message.reply_text(
-        escape_markdown(help_text),
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    help_text = "\n".join(help_text_lines)
+    
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != ADMIN_ID:
-        await update.message.reply_text("⛔️ هذا الأمر متاح للمشرف فقط.")
+        await update.message.reply_text("⛔️ هذا الأمر متاح للمشرف فقط\\.")
         return
     
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         
-        c.execute('SELECT COUNT(*) FROM downloads')
+        c.execute('SELECT COUNT\\(\\*\\) FROM downloads')
         total = c.fetchone()[0]
         
-        c.execute('SELECT COUNT(*) FROM downloads WHERE success=1')
+        c.execute('SELECT COUNT\\(\\*\\) FROM downloads WHERE success=1')
         success = c.fetchone()[0]
         
-        c.execute('SELECT COUNT(DISTINCT user_id) FROM downloads')
+        c.execute('SELECT COUNT\\(DISTINCT user_id\\) FROM downloads')
         users = c.fetchone()[0]
         
-        c.execute('SELECT COUNT(*) FROM downloads WHERE DATE(timestamp) = DATE("now")')
+        c.execute('SELECT COUNT\\(\\*\\) FROM downloads WHERE DATE\\(timestamp\\) = DATE\\(\\"now\\"\\)')
         today = c.fetchone()[0]
         
         conn.close()
         
         success_rate = (success / total * 100) if total > 0 else 0
         
-        stats_text = (
-            f"📊 **إحصائيات البوت**\n\n"
-            f"👥 **المستخدمون:** {users}\n"
-            f"📥 **إجمالي التحميلات:** {total}\n"
-            f"✅ **النجاح:** {success}\n"
-            f"📈 **نسبة النجاح:** {success_rate:.1f}%\n"
-            f"📅 **اليوم:** {today}"
-        )
+        stats_text_lines = [
+            f"📊 **إحصائيات البوت**",
+            "",
+            f"👥 **المستخدمون\\:** {users}",
+            f"📥 **إجمالي التحميلات\\:** {total}",
+            f"✅ **النجاح\\:** {success}",
+            f"📈 **نسبة النجاح\\:** {success_rate:.1f}%",
+            f"📅 **اليوم\\:** {today}"
+        ]
         
-        await update.message.reply_text(
-            escape_markdown(stats_text),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        stats_text = "\n".join(stats_text_lines)
+        
+        await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         await update.message.reply_text("❌ حدث خطأ في جلب الإحصائيات")
 
@@ -537,26 +572,26 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     
     if not is_valid_url(url):
-        await update.message.reply_text("⚠️ الرابط غير صالح. يرجى إرسال رابط صحيح.")
+        await update.message.reply_text("⚠️ الرابط غير صالح\\. يرجى إرسال رابط صحيح\\.")
         return
     
     if not await check_rate_limit(user.id):
-        await update.message.reply_text("⏱ لقد تجاوزت الحد المسموح (5 طلبات/دقيقة). يرجى الانتظار قليلاً.")
+        await update.message.reply_text("⏱ لقد تجاوزت الحد المسموح \\(5 طلبات/دقيقة\\)\\. يرجى الانتظار قليلاً\\.")
         return
     
     if active_downloads[user.id] >= 1:
-        await update.message.reply_text("⏳ لديك تحميل قيد التنفيذ بالفعل. يرجى الانتظار حتى يكتمل.")
+        await update.message.reply_text("⏳ لديك تحميل قيد التنفيذ بالفعل\\. يرجى الانتظار حتى يكتمل\\.")
         return
     
     active_downloads[user.id] += 1
     
     try:
-        msg = await update.message.reply_text("⏳ جاري تحليل الرابط...")
+        msg = await update.message.reply_text("⏳ جاري تحليل الرابط\\.\\.\\.")
         platform = detect_platform(url)
         
         if platform == 'instagram':
             files = await run_gallery_dl(url)
-            await msg.edit_text("⚡️ جاري إرسال الملف...")
+            await msg.edit_text("⚡️ جاري إرسال الملف\\.\\.\\.")
             
             if len(files) == 1:
                 file_path = Path(files[0])
@@ -624,11 +659,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     except Exception as e:
         error_msg = str(e)
-        await msg.edit_text(f"❌ حدث خطأ: {escape_markdown(error_msg[:200])}")
+        safe_error_msg = escape_markdown(error_msg[:200])
+        await msg.edit_text(f"❌ حدث خطأ\\: {safe_error_msg}")
         log_download(user.id, user.username, url, 'unknown', False, error_msg)
     
     finally:
-        active_downloads[user.id] -= 1
+        active_downloads[user.id] = max(0, active_downloads[user.id] - 1)
         if 'files' in locals():
             for file_path in files:
                 try:
@@ -652,7 +688,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if action_type == "ignore":
-        await query.answer("⚠️ هذا الملف كبير جداً (>50MB)", show_alert=True)
+        await query.answer("⚠️ هذا الملف كبير جداً \\(\\>25MB\\)", show_alert=True)
         return
     
     if action_type == "cancel":
@@ -693,7 +729,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = query.from_user
         
         if msg_id not in context.user_data:
-            await query.edit_message_text("⚠️ انتهت صلاحية الجلسة. يرجى إرسال الرابط مرة أخرى.")
+            await query.edit_message_text("⚠️ انتهت صلاحية الجلسة\\. يرجى إرسال الرابط مرة أخرى\\.")
             return
         
         info = context.user_data[msg_id]
@@ -701,7 +737,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         platform = detect_platform(url)
         
         if active_downloads[user.id] >= 1:
-            await query.answer("⏳ لديك تحميل قيد التنفيذ. يرجى الانتظار.", show_alert=True)
+            await query.answer("⏳ لديك تحميل قيد التنفيذ\\. يرجى الانتظار\\.", show_alert=True)
             return
         
         active_downloads[user.id] += 1
@@ -728,7 +764,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await query.message.delete()
                         await context.bot.send_message(
                             chat_id=query.message.chat_id,
-                            text=f"❌ حجم الملف ({format_size(actual_size)}) يتجاوز الحد المسموح (50MB)."
+                            text=f"❌ حجم الملف \\({format_size(actual_size)}\\) يتجاوز الحد المسموح \\(25MB\\)\\."
                         )
                         if msg_id in context.user_data:
                             del context.user_data[msg_id]
@@ -768,15 +804,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             except Exception as e:
                 error_msg = str(e)
+                safe_error_msg = escape_markdown(error_msg[:200])
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"❌ فشل التحميل: {escape_markdown(error_msg[:200])}",
+                    text=f"❌ فشل التحميل\\: {safe_error_msg}",
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
                 log_download(user.id, user.username, url, platform, False, error_msg)
             
             finally:
-                active_downloads[user.id] -= 1
+                active_downloads[user.id] = max(0, active_downloads[user.id] - 1)
                 if file_path and os.path.exists(file_path):
                     try:
                         os.remove(file_path)
@@ -795,7 +832,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update and isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text(
-                "❌ حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى."
+                "❌ حدث خطأ غير متوقع\\. يرجى المحاولة مرة أخرى\\."
             )
     except:
         pass
@@ -809,18 +846,28 @@ flask_app = Flask(__name__)
 def health_check():
     return "✅ البوت يعمل بشكل طبيعي", 200
 
+@flask_app.route('/health')
+def health():
+    return json.dumps({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=PORT)
+    from werkzeug.serving import run_simple
+    run_simple('0.0.0.0', PORT, flask_app, threaded=True, use_reloader=False)
 
 # ==============================================================================
 # 15. التطبيق الرئيسي
 # ==============================================================================
 def main():
     init_db()
-    DOWNLOAD_PATH.mkdir(exist_ok=True)
+    DOWNLOAD_PATH.mkdir(exist_ok=True, parents=True)
+    
+    # تنظيف المجلد المؤقت عند الإغلاق
+    atexit.register(lambda: shutil.rmtree(DOWNLOAD_PATH, ignore_errors=True))
     
     threading.Thread(target=run_flask, daemon=True).start()
     logging.info(f"🌐 خادم الصحة يعمل على المنفذ {PORT}")
+    logging.info(f"📁 مسار التنزيلات المؤقت: {DOWNLOAD_PATH}")
+    logging.info(f"🗄️ مسار قاعدة البيانات: {DB_PATH}")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -837,7 +884,7 @@ def main():
     logging.info("🚀 بدء تشغيل البوت...")
     logging.info("✅ البوت جاهز للاستخدام!")
     
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
 
 if __name__ == '__main__':
     if not BOT_TOKEN:
@@ -848,6 +895,12 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         logging.info("⏹ توقف البوت بواسطة المستخدم")
+        # تنظيف المجلد المؤقت
+        if DOWNLOAD_PATH.exists():
+            shutil.rmtree(DOWNLOAD_PATH, ignore_errors=True)
     except Exception as e:
         logging.fatal(f"💥 خطأ فادح: {e}", exc_info=True)
+        # تنظيف المجلد المؤقت
+        if DOWNLOAD_PATH.exists():
+            shutil.rmtree(DOWNLOAD_PATH, ignore_errors=True)
         exit(1)
