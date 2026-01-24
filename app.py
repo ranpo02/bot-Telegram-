@@ -857,7 +857,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=query.message.chat_id,
                         video=file_obj,
                         caption=f"✅ ",
-                        parse_mode=None, 
                         supports_streaming=True
                     )
                     quality = 'فيديو'
@@ -887,7 +886,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if file_path and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
-                                    os.remove(file_path)
                 except:
                     pass
             
