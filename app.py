@@ -847,7 +847,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_audio(
                         chat_id=query.message.chat_id,
                         audio=file_obj,
-                        title=title[:64],
+                        title="الصوت",
                         caption="✅ تم التحميل بنجاح"
                     )
                     quality = 'MP3'
@@ -856,7 +856,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_video(
                         chat_id=query.message.chat_id,
                         video=file_obj,
-                        caption=f"✅ {title[:200]}",
+                        caption=f"✅ ",
                         parse_mode=None, 
                         supports_streaming=True
                     )
@@ -887,6 +887,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if file_path and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
+                                    os.remove(file_path)
                 except:
                     pass
             
