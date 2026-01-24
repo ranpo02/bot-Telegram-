@@ -856,8 +856,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_video(
                         chat_id=query.message.chat_id,
                         video=file_obj,
-                        caption=f"✅ {escape_markdown(title[:200])}",
-                        parse_mode=ParseMode.MARKDOWN_V2,
+                        caption=f"✅ {title[:200]}",
+                        parse_mode=None
                         supports_streaming=True
                     )
                     quality = 'فيديو'
