@@ -875,8 +875,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text=f"❌ فشل التحميل: {escape_markdown(error_msg[:200])}",
-                parse_mode=ParseMode.MARKDOWN_V2
+                text=f"❌ فشل التحميل: {error_msg[:200]}",
+                parse_mode=None
             )
             log_download(user.id, user.username, url, platform, False, error_msg)
         
