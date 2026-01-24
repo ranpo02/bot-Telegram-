@@ -282,7 +282,7 @@ async def run_gallery_dl(url: str) -> list:
     command = [
         'gallery-dl',
         '--directory', str(DOWNLOAD_PATH),
-        '--timeout', '60',
+    
         '--retries', '3',
         url
     ]
