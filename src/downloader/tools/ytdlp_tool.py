@@ -1,44 +1,71 @@
 # src/downloader/tools/ytdlp_tool.py
 import asyncio
+import shutil
+from pathlib import Path
 from yt_dlp import YoutubeDL
 import logging
 
-from src.core.config import DOWNLOAD_PATH
-from src.core.exceptions import VideoIsPrivateOrDeletedError
+from src.core.config import DOWNLOAD_PATH, COOKIES_PATH, PROXY_URL
+from src.core.exceptions import VideoIsPrivateOrDeletedError, DownloadError
 
 logger = logging.getLogger(__name__)
 
-async def download_with_ytdlp(url: str, proxy: str | None = None) -> str:
+async def download_with_ytdlp(url: str, proxy: str | None = None, is_audio: bool = False) -> str:
     """
-    Downloads a video using yt-dlp with optional proxy.
+    Downloads a video or audio using yt-dlp.
     Returns the file path on success.
-    Raises DownloadError on failure.
     """
+    ffmpeg_path = shutil.which('ffmpeg') or '/usr/bin/ffmpeg'
+    node_path = shutil.which('node') or shutil.which('deno')
+
     ydl_opts = {
-        'format': 'b[ext=mp4]/best[ext=mp4]/best',
+        'format': 'bestaudio/best' if is_audio else 'bestvideo[filesize<46M]+bestaudio/best[filesize<48M]/best',
         'outtmpl': f'{DOWNLOAD_PATH}/%(id)s.%(ext)s',
         'noplaylist': True,
         'quiet': True,
+        'ffmpeg_location': ffmpeg_path,
         'merge_output_format': 'mp4',
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        }
+        'remote_components': ['ejs:github'],
     }
-    if proxy:
-        ydl_opts['proxy'] = proxy
+
+    if node_path:
+        ydl_opts['js_runtimes'] = {'node': {'path': node_path}}
+
+    if is_audio:
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+
+    if proxy or PROXY_URL:
+        ydl_opts['proxy'] = proxy or PROXY_URL
+
+    if Path(COOKIES_PATH).exists() and Path(COOKIES_PATH).stat().st_size > 0:
+        ydl_opts['cookiefile'] = COOKIES_PATH
 
     try:
         loop = asyncio.get_running_loop()
-        with YoutubeDL(ydl_opts) as ydl:
-            # Run the blocking I/O operation in a separate thread
-            info = await loop.run_in_executor(
-                None, lambda: ydl.extract_info(url, download=True)
-            )
-            return ydl.prepare_filename(info)
+        def _do_download():
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if 'entries' in info and info['entries']:
+                    info = info['entries'][0]
+                filename = ydl.prepare_filename(info)
+                if is_audio:
+                    mp3_path = str(Path(filename).with_suffix('.mp3'))
+                    if Path(mp3_path).exists():
+                        return mp3_path
+                mp4_path = str(Path(filename).with_suffix('.mp4'))
+                if Path(mp4_path).exists():
+                    return mp4_path
+                return filename
+
+        return await loop.run_in_executor(None, _do_download)
     except Exception as e:
         error_str = str(e).lower()
         if "private video" in error_str or "video is unavailable" in error_str:
             raise VideoIsPrivateOrDeletedError()
         
-        logger.error(f"yt-dlp failed for URL {url} with proxy {proxy}: {e}")
-        raise
+        logger.error(f"yt-dlp failed for URL {url}: {e}")
+        raise DownloadError(f"فشل تحميل الرابط: {e}")
