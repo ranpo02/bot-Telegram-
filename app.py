@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import BadRequest
 from telegram.constants import ParseMode
@@ -308,23 +308,24 @@ def get_base_ydl_opts(url: str) -> dict:
     if PROXY_URL:
         opts['proxy'] = PROXY_URL
 
-    # تحسينات خاصة بيوتيوب لتخطي مشاكل الحظر (استخدام عملاء الهواتف android و ios لتجنب متطلبات تسجيل الدخول أو تأكيد الروبوت)
+    # تحسينات خاصة بيوتيوب لتخطي مشاكل الحظر (استخدام عملاء الهواتف والتلفاز لتجنب قيود الروبوت)
     if 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
         opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['android', 'ios'],
+                'player_client': ['android', 'tv_samsung', 'visionos'],
             }
         }
     
     return opts
 
 async def run_gallery_dl(url: str) -> list:
-    """تحميل المنشورات المتعددة أو الصور عبر gallery-dl"""
+    """تحميل المنشورات المتعددة أو الصور عبر gallery-dl مباشرة"""
     DOWNLOAD_PATH.mkdir(exist_ok=True)
     
     command = [
         'gallery-dl',
         '--directory', str(DOWNLOAD_PATH),
+        '--no-mtime',
         '--retries', '3',
     ]
     
@@ -355,59 +356,79 @@ async def run_gallery_dl(url: str) -> list:
             pass
         raise DownloadError("انتهت مهلة تحميل Instagram")
     
-    if process.returncode != 0:
-        error = stderr.decode('utf-8', errors='ignore')
-        # لا نوقف فوراً بل نترك محاولة yt-dlp كخيار بديل
-        raise DownloadError(f"gallery-dl error: {error[:200]}")
-    
+    output_text = stdout.decode('utf-8', errors='ignore')
     files = []
-    for root, _, filenames in os.walk(DOWNLOAD_PATH):
-        for name in filenames:
-            file_path = os.path.join(root, name)
-            # تجاهل الملفات القديمة
-            if time.time() - os.path.getmtime(file_path) < 300:
-                files.append(file_path)
+    for line in output_text.splitlines():
+        line = line.strip()
+        if line and not line.startswith('#'):
+            p = Path(line)
+            if p.exists() and p.is_file():
+                files.append(str(p))
+
+    # تحقق إضافي في مجلد التحميل في حال تم الحفظ بأسماء أخرى
+    if not files:
+        for f in DOWNLOAD_PATH.glob('*'):
+            if f.is_file() and (time.time() - f.stat().st_mtime < 120):
+                files.append(str(f))
     
     if not files:
-        raise DownloadError("لم يتم العثور على ملفات")
+        if process.returncode != 0:
+            error = stderr.decode('utf-8', errors='ignore')
+            raise DownloadError(f"gallery-dl error: {error[:200]}")
+        raise DownloadError("لم يتم العثور على وسائط لتحميلها.")
     
-    return files
+    return sorted(list(set(files)))
 
 async def run_ydl_analysis(url: str) -> dict:
-    """تحليل الرابط وجلب بياناته بدون تحميل"""
+    """تحليل الرابط وجلب بياناته بدون تحميل مع نظام تدوير تلقائي للعملاء البدلاء في حال واجه قيوداً"""
     cached = await get_cached_info(url)
     if cached:
         logging.info("📦 استخدام البيانات المؤقتة (Cache)")
         return cached
     
-    opts = get_base_ydl_opts(url)
-    opts['skip_download'] = True
-    opts['extract_flat'] = False
-    
-    try:
-        loop = asyncio.get_event_loop()
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await loop.run_in_executor(
-                None,
-                lambda: ydl.extract_info(url, download=False)
-            )
-        
-        if not info:
-            raise DownloadError("تعذر قراءة بيانات هذا الرابط.")
-        
-        # إذا كان الرابط قائمة تشغيل أو مدخلات متعددة
-        if 'entries' in info and info['entries']:
-            info = info['entries'][0]
+    # قائمة استراتيجيات تجربة العملاء ليوتيوب
+    is_yt = ('youtube.com' in url.lower() or 'youtu.be' in url.lower())
+    client_candidates = [
+        ['android'],
+        ['tv_samsung', 'android'],
+        ['visionos', 'android'],
+        ['android', 'ios'],
+        ['default']
+    ] if is_yt else [None]
 
-        await set_cached_info(url, info)
-        return info
-    except Exception as e:
-        err = str(e)
-        if "Private video" in err or "private" in err.lower():
-            raise DownloadError("هذا الفيديو خاص أو غير متاح للعامة.")
-        elif "Sign in" in err:
-            raise DownloadError("المحتوى يتطلب تسجيل دخول أو تأكيد أنك لست روبوت.")
-        raise DownloadError(f"خطأ في التحليل: {err[:200]}")
+    last_error = None
+    loop = asyncio.get_event_loop()
+
+    for client_list in client_candidates:
+        opts = get_base_ydl_opts(url)
+        opts['skip_download'] = True
+        opts['extract_flat'] = False
+        if client_list:
+            opts['extractor_args'] = {'youtube': {'player_client': client_list}}
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = await loop.run_in_executor(
+                    None,
+                    lambda: ydl.extract_info(url, download=False)
+                )
+
+            if info:
+                if 'entries' in info and info['entries']:
+                    info = info['entries'][0]
+                await set_cached_info(url, info)
+                return info
+        except Exception as e:
+            last_error = e
+            logging.warning(f"Analysis attempt with client {client_list} failed: {e}")
+            continue
+
+    err = str(last_error or "تعذر التحليل")
+    if "Private video" in err or "private" in err.lower():
+        raise DownloadError("هذا الفيديو خاص أو غير متاح للعامة.")
+    elif "Sign in" in err:
+        raise DownloadError("هذا الفيديو يفرض يوتيوب قيوداً مشددة عليه ويتطلب تسجيل دخول.")
+    raise DownloadError(f"خطأ في التحليل: {err[:200]}")
 
 async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
     """تحميل الملف باستخدام yt-dlp بأفضل جودة ملائمة لحدود تيليجرام (50MB)"""
@@ -667,22 +688,35 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         platform = detect_platform(url)
         logging.info(f"🔗 معالجة رابط من منصة: {platform} للمستخدم {user.id}")
         
-        # إنستغرام: تجربة التحميل المتعدد للصور والمنشورات عبر gallery-dl أولاً، أو الانتقال لـ yt-dlp
+        # إنستغرام: تجربة التحميل المتعدد للصور والمنشورات عبر gallery-dl أولاً
         if platform == 'instagram':
             try:
                 files = await run_gallery_dl(url)
-                await msg.edit_text("⚡️ جاري إرسال المحتوى...")
+                await msg.edit_text("⚡️ جاري إرسال الصور/المحتوى مباشرة...")
                 
+                media_group = []
+                single_files = []
+
                 for f_path in files:
                     p = Path(f_path)
                     if not p.exists():
                         continue
-                    file_size = p.stat().st_size
-                    with open(p, 'rb') as f_obj:
-                        if p.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
-                            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=f_obj, caption="✅ تم التحميل بنجاح")
-                        else:
-                            await context.bot.send_video(chat_id=update.effective_chat.id, video=f_obj, caption="✅ تم التحميل بنجاح", supports_streaming=True)
+                    ext = p.suffix.lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                        with open(p, 'rb') as f_obj:
+                            await context.bot.send_photo(
+                                chat_id=update.effective_chat.id,
+                                photo=f_obj,
+                                caption="✅ تم التحميل بنجاح"
+                            )
+                    else:
+                        with open(p, 'rb') as f_obj:
+                            await context.bot.send_video(
+                                chat_id=update.effective_chat.id,
+                                video=f_obj,
+                                caption="✅ تم التحميل بنجاح",
+                                supports_streaming=True
+                            )
                     try:
                         p.unlink()
                     except:
@@ -693,7 +727,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             except Exception as e:
                 logging.info(f"gallery-dl fallback to yt-dlp for Instagram: {e}")
-                # المتابعة إلى yt-dlp في حال فشل gallery-dl
+                # المتابعة إلى yt-dlp في حال كان المنشور فيديو أو ريلز لم تلتقطه gallery-dl
         
         # التحليل بواسطة yt-dlp
         info = await run_ydl_analysis(url)
@@ -815,7 +849,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not file_path or not os.path.exists(file_path):
                 raise DownloadError("تعذر العثور على الملف المحمل.")
-            
+
             actual_size = os.path.getsize(file_path)
             if actual_size > MAX_FILE_SIZE:
                 await status_msg.edit_text(
