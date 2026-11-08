@@ -26,6 +26,11 @@ async def download_with_ytdlp(url: str, proxy: str | None = None, is_audio: bool
         'ffmpeg_location': ffmpeg_path,
         'merge_output_format': 'mp4',
         'remote_components': ['ejs:github'],
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'],
+            }
+        },
     }
 
     if node_path:

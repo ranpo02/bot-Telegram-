@@ -308,12 +308,11 @@ def get_base_ydl_opts(url: str) -> dict:
     if PROXY_URL:
         opts['proxy'] = PROXY_URL
 
-    # تحسينات خاصة بيوتيوب لتخطي مشاكل الحظر
+    # تحسينات خاصة بيوتيوب لتخطي مشاكل الحظر (استخدام عملاء الهواتف android و ios لتجنب متطلبات تسجيل الدخول أو تأكيد الروبوت)
     if 'youtube.com' in url.lower() or 'youtu.be' in url.lower():
         opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['mweb', 'web', 'android', 'ios'],
-                'skip': ['dash', 'hls'] if False else []
+                'player_client': ['android', 'ios'],
             }
         }
     
