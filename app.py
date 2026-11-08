@@ -270,10 +270,61 @@ def escape_markdown(text: str) -> str:
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
 
 # ==============================================================================
-# 8. محرك التحميل الحديث والشامل
+# 8. محرك التحميل والبروكسيات التلقائية الديناميكية لتخطي حظر الاستضافات السحابية
 # ==============================================================================
 class DownloadError(Exception):
     pass
+
+class DynamicProxyPool:
+    """نظام جلب وتدوير بروكسيات نشطة مجاناً وتلقائياً لتخطي حظر الاستضافات (Fly.io / Render)"""
+    def __init__(self):
+        self.proxies = []
+        self.last_fetch = 0
+        self.lock = asyncio.Lock()
+
+    async def get_proxies(self) -> list:
+        now = time.time()
+        if now - self.last_fetch < 1200 and self.proxies:
+            return self.proxies
+
+        async with self.lock:
+            if now - self.last_fetch < 1200 and self.proxies:
+                return self.proxies
+
+            loop = asyncio.get_event_loop()
+            def _fetch():
+                urls = [
+                    'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=all&ssl=yes&anonymity=elite',
+                    'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt'
+                ]
+                import urllib.request
+                collected = []
+                for u in urls:
+                    try:
+                        req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, timeout=4) as r:
+                            lines = r.read().decode('utf-8', errors='ignore').splitlines()
+                            for l in lines:
+                                l = l.strip()
+                                if l and ':' in l and not l.startswith('#'):
+                                    collected.append(f"http://{l}")
+                    except Exception:
+                        pass
+                random.shuffle(collected)
+                return collected[:100]
+
+            try:
+                result = await loop.run_in_executor(None, _fetch)
+                if result:
+                    self.proxies = result
+                    self.last_fetch = time.time()
+                    logging.info(f"🌐 تم تحديث قائمة البروكسيات التلقائية المجانية: {len(self.proxies)} بروكسي متاح")
+            except Exception as e:
+                logging.warning(f"تعذر جلب بروكسيات تلقائية: {e}")
+
+        return self.proxies
+
+proxy_pool = DynamicProxyPool()
 
 def get_base_ydl_opts(url: str) -> dict:
     ffmpeg_path = shutil.which('ffmpeg') or '/usr/bin/ffmpeg'
@@ -376,28 +427,27 @@ async def run_gallery_dl(url: str) -> list:
             error = stderr.decode('utf-8', errors='ignore')
             raise DownloadError(f"gallery-dl error: {error[:200]}")
         raise DownloadError("لم يتم العثور على وسائط لتحميلها.")
-    
+
     return sorted(list(set(files)))
 
 async def run_ydl_analysis(url: str) -> dict:
-    """تحليل الرابط وجلب بياناته بدون تحميل مع نظام تدوير تلقائي للعملاء البدلاء في حال واجه قيوداً"""
+    """تحليل الرابط وجلب بياناته بدون تحميل مع نظام تدوير تلقائي للعملاء والبروكسيات لتخطي حظر الاستضافات"""
     cached = await get_cached_info(url)
     if cached:
         logging.info("📦 استخدام البيانات المؤقتة (Cache)")
         return cached
     
-    # قائمة استراتيجيات تجربة العملاء ليوتيوب
     is_yt = ('youtube.com' in url.lower() or 'youtu.be' in url.lower())
+    last_error = None
+    loop = asyncio.get_event_loop()
+
+    # 1. المحاولة المباشرة بالعملاء المخصصين
     client_candidates = [
         ['android'],
         ['tv_samsung', 'android'],
         ['visionos', 'android'],
-        ['android', 'ios'],
         ['default']
     ] if is_yt else [None]
-
-    last_error = None
-    loop = asyncio.get_event_loop()
 
     for client_list in client_candidates:
         opts = get_base_ydl_opts(url)
@@ -412,7 +462,6 @@ async def run_ydl_analysis(url: str) -> dict:
                     None,
                     lambda: ydl.extract_info(url, download=False)
                 )
-
             if info:
                 if 'entries' in info and info['entries']:
                     info = info['entries'][0]
@@ -420,8 +469,36 @@ async def run_ydl_analysis(url: str) -> dict:
                 return info
         except Exception as e:
             last_error = e
-            logging.warning(f"Analysis attempt with client {client_list} failed: {e}")
-            continue
+            if "Sign in to confirm" not in str(e) and "Private" in str(e):
+                break
+
+    # 2. في حال تم اكتشاف أن IP الخادم محظور (Sign in to confirm you're not a bot) في استضافة مثل Fly.io
+    # يتم التدوير التلقائي الفوري عبر بروكسيات سريعة ومجانية لتخطي شاشة الحظر
+    if is_yt and ("Sign in to confirm" in str(last_error) or "bot" in str(last_error).lower()):
+        logging.info("⚠️ تم اكتشاف حظر IP الاستضافة من يوتيوب، جاري المحاولة عبر البروكسيات التلقائية...")
+        free_proxies = await proxy_pool.get_proxies()
+        for p in free_proxies[:8]:
+            opts = get_base_ydl_opts(url)
+            opts['skip_download'] = True
+            opts['proxy'] = p
+            opts['socket_timeout'] = 4
+            opts['retries'] = 0
+            opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
+            try:
+                def _extract_proxy():
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        return ydl.extract_info(url, download=False)
+                info = await loop.run_in_executor(None, _extract_proxy)
+                if info:
+                    if 'entries' in info and info['entries']:
+                        info = info['entries'][0]
+                    # حفظ البروكسي الناجح في الكاش لاستخدامه في التحميل
+                    info['_used_proxy'] = p
+                    await set_cached_info(url, info)
+                    logging.info(f"✅ تم فك حظر يوتيوب بنجاح عبر البروكسي التلقائي: {p}")
+                    return info
+            except Exception:
+                continue
 
     err = str(last_error or "تعذر التحليل")
     if "Private video" in err or "private" in err.lower():
@@ -430,61 +507,78 @@ async def run_ydl_analysis(url: str) -> dict:
         raise DownloadError("هذا الفيديو يفرض يوتيوب قيوداً مشددة عليه ويتطلب تسجيل دخول.")
     raise DownloadError(f"خطأ في التحليل: {err[:200]}")
 
-async def run_ydl_download(url: str, format_id: str, is_audio: bool) -> str:
-    """تحميل الملف باستخدام yt-dlp بأفضل جودة ملائمة لحدود تيليجرام (50MB)"""
+async def run_ydl_download(url: str, format_id: str, is_audio: bool, proxy_hint: str = None) -> str:
+    """تحميل الملف باستخدام yt-dlp بأفضل جودة ملائمة لحدود تيليجرام (50MB) مع دعم البروكسي في حال حظر السحابة"""
     DOWNLOAD_PATH.mkdir(exist_ok=True)
-    opts = get_base_ydl_opts(url)
-    
-    if is_audio:
-        # تحميل الصوت بجودة ملائمة ومناسبة لحجم تيليجرام
-        opts['format'] = 'bestaudio/best'
-        opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-    else:
-        if format_id and format_id != 'best':
-            opts['format'] = f"{format_id}+bestaudio/best"
+    is_yt = ('youtube.com' in url.lower() or 'youtu.be' in url.lower())
+
+    def _create_opts(p=None):
+        opts = get_base_ydl_opts(url)
+        if p:
+            opts['proxy'] = p
+        if is_audio:
+            opts['format'] = 'bestaudio/best'
+            opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
         else:
-            # الذكاء التلقائي: اختيار أفضل دقة لا تتجاوز حدود 50MB لتيليجرام
-            opts['format'] = 'bestvideo[filesize<46M]+bestaudio/best[filesize<48M]/best'
-
-        opts['merge_output_format'] = 'mp4'
+            if format_id and format_id != 'best':
+                opts['format'] = f"{format_id}+bestaudio/best"
+            else:
+                opts['format'] = 'bestvideo[filesize<46M]+bestaudio/best[filesize<48M]/best'
+            opts['merge_output_format'] = 'mp4'
+        return opts
     
-    try:
-        loop = asyncio.get_event_loop()
-        
-        def download():
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if 'entries' in info and info['entries']:
-                    info = info['entries'][0]
+    loop = asyncio.get_event_loop()
 
-                filename = ydl.prepare_filename(info)
-                if is_audio:
-                    mp3_file = str(Path(filename).with_suffix('.mp3'))
-                    if os.path.exists(mp3_file):
-                        return mp3_file
+    def _do_download(download_opts):
+        with yt_dlp.YoutubeDL(download_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if 'entries' in info and info['entries']:
+                info = info['entries'][0]
+            filename = ydl.prepare_filename(info)
+            if is_audio:
+                mp3_file = str(Path(filename).with_suffix('.mp3'))
+                if os.path.exists(mp3_file):
+                    return mp3_file
+            mp4_file = str(Path(filename).with_suffix('.mp4'))
+            if os.path.exists(mp4_file):
+                return mp4_file
+            return filename
 
-                # في حال تم دمج الفيديو بصيغة mp4
-                mp4_file = str(Path(filename).with_suffix('.mp4'))
-                if os.path.exists(mp4_file):
-                    return mp4_file
+    # المحاولة أولاً بالبروكسي المكتشف أو الاتصال المباشر
+    proxies_to_try = [proxy_hint] if proxy_hint else [None]
 
-                return filename
-        
-        result = await asyncio.wait_for(
-            loop.run_in_executor(None, download),
-            timeout=DOWNLOAD_TIMEOUT
-        )
-        
-        return result
-        
-    except asyncio.TimeoutError:
-        raise DownloadError(f"انتهت مهلة التحميل ({DOWNLOAD_TIMEOUT} ثانية). يرجى تجربة جودة أقل أو مقطع أقصر.")
-    except Exception as e:
-        raise DownloadError(f"خطأ في التحميل: {str(e)[:200]}")
+    last_ex = None
+    for p in proxies_to_try:
+        try:
+            opts = _create_opts(p)
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: _do_download(opts)),
+                timeout=DOWNLOAD_TIMEOUT
+            )
+        except Exception as e:
+            last_ex = e
+            logging.warning(f"Download attempt failed with proxy {p}: {e}")
+
+    # محاولة بديلة عبر البروكسيات التلقائية في حال كان حظر من يوتيوب
+    if is_yt and ("Sign in" in str(last_ex) or "403" in str(last_ex) or "bot" in str(last_ex).lower()):
+        free_proxies = await proxy_pool.get_proxies()
+        for p in free_proxies[:5]:
+            try:
+                opts = _create_opts(p)
+                opts['socket_timeout'] = 10
+                opts['retries'] = 1
+                return await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: _do_download(opts)),
+                    timeout=DOWNLOAD_TIMEOUT
+                )
+            except Exception:
+                continue
+
+    raise DownloadError(f"خطأ في التحميل: {str(last_ex)[:200]}")
 
 # ==============================================================================
 # 9. واجهات المستخدم التفاعلية السريعة
@@ -845,7 +939,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = None
         try:
             is_audio = (media_type == 'a')
-            file_path = await run_ydl_download(url, resource_id, is_audio)
+            proxy_hint = info.get('_used_proxy')
+            file_path = await run_ydl_download(url, resource_id, is_audio, proxy_hint=proxy_hint)
             
             if not file_path or not os.path.exists(file_path):
                 raise DownloadError("تعذر العثور على الملف المحمل.")
@@ -863,7 +958,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             title = info.get('title', 'تم التحميل')
             caption = f"✅ *{escape_markdown(title[:80])}*\n\n🤖 بواسطة بوت التحميل"
-            
+
             with open(file_path, 'rb') as f_obj:
                 if is_audio:
                     await context.bot.send_audio(
